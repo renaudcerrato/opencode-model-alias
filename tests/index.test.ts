@@ -90,6 +90,39 @@ const fetchProvidersOk = async () =>
 		},
 	] as any;
 
+// Minimal opencode client stub for plugin-level tests: only provider.list
+// is exercised by the plugin.
+function makeClient(overrides: {
+	providerList?: unknown;
+	providerError?: unknown;
+}) {
+	return {
+		provider: {
+			list: jest.fn(async () => {
+				if (overrides.providerError) {
+					return { error: overrides.providerError, data: undefined };
+				}
+				return { error: undefined, data: { all: overrides.providerList ?? [] } };
+			}),
+		},
+	} as any;
+}
+
+// The README's example model-aliases.json, verbatim: object entries with and
+// without variants plus string aliases chaining into an object entry — the
+// mixed state a real user's file has after a few weeks.
+const README_ALIAS_FILE = {
+	cheap: { model: "openai/gpt-5.6-luna", variant: "max" },
+	genius: { model: "openai/gpt-5.6-sol" },
+	smart: { model: "ollama-cloud/glm-5.3-flash", variant: "max" },
+	contextscout: "cheap",
+	externalscout: "cheap",
+};
+
+function writeReadmeAliasFile(): void {
+	mockFs[ALIAS_FILE] = JSON.stringify(README_ALIAS_FILE, null, 2);
+}
+
 // Exception-safe fs stubbing: stubs are queued and restored in afterEach,
 // so a failing test cannot leak a broken mock into later tests.
 const fsRestorers: Array<() => void> = [];
@@ -1192,6 +1225,78 @@ describe("handleAliasCommand", () => {
 		// "my key" is split into ["my", "key"]; only "my" is considered.
 		expect(result).toContain("Alias 'my' deleted");
 	});
+
+	test("set - repoints an existing alias to a different model and drops the old target", async () => {
+		mockFs[ALIAS_FILE] = '{"cheap": "openai/gpt-4o-mini"}';
+		const result = await handleAliasCommand(
+			"set cheap openai/gpt-4o",
+			fetchProvidersOk,
+		);
+		expect(result).toContain("Alias 'cheap' set to 'openai/gpt-4o'");
+		expect(readAliases()).toEqual({ cheap: { model: "openai/gpt-4o" } });
+		const listResult = await handleAliasCommand("list", fetchProvidersOk);
+		expect(listResult).toBe("Model aliases:\n  cheap → openai/gpt-4o");
+	});
+
+	test("set - rejects a variant that exists on another provider but not the named one", async () => {
+		// Variant lookup must be scoped to the named provider: gpt-4o exists
+		// on both openai (no variants) and azure (variants: max).
+		const result = await handleAliasCommand(
+			"set x openai/gpt-4o max",
+			async () =>
+				[
+					{ id: "openai", models: [{ id: "gpt-4o" }] },
+					{ id: "azure", models: [{ id: "gpt-4o", variants: { max: {} } }] },
+				] as any,
+		);
+		expect(result).toBe(
+			"Error: variant 'max' is not listed for model 'openai/gpt-4o'. The model lists no variants.",
+		);
+		expect(mockFs[ALIAS_FILE]).toBeUndefined();
+	});
+
+	test("set - accepts a variant listed for the named provider even when another provider lacks it", async () => {
+		const result = await handleAliasCommand(
+			"set x azure/gpt-4o max",
+			async () =>
+				[
+					{ id: "openai", models: [{ id: "gpt-4o" }] },
+					{ id: "azure", models: [{ id: "gpt-4o", variants: { max: {} } }] },
+				] as any,
+		);
+		expect(result).toContain("Alias 'x' set");
+		expect(readAliases()).toEqual({
+			x: { model: "azure/gpt-4o", variant: "max" },
+		});
+	});
+
+	test("delete - succeeds and list marks the dependent alias unresolved", async () => {
+		// source → intermediate → model; deleting the middle link leaves
+		// source dangling. Pin the current user-visible outcome.
+		mockFs[ALIAS_FILE] =
+			'{"source": "intermediate", "intermediate": "openai/gpt-4o-mini"}';
+		const deleteResult = await handleAliasCommand(
+			"delete intermediate",
+			fetchProvidersOk,
+		);
+		expect(deleteResult).toContain("Alias 'intermediate' deleted");
+		const listResult = await handleAliasCommand("list", fetchProvidersOk);
+		expect(listResult).toContain("source → intermediate [unresolved]");
+	});
+
+	test("delete - config hook rewrites a dependent agent model to the dangling name", async () => {
+		mockFs[ALIAS_FILE] =
+			'{"source": "intermediate", "intermediate": "openai/gpt-4o-mini"}';
+		await handleAliasCommand("delete intermediate", fetchProvidersOk);
+		const config: any = {
+			agent: { scout: { model: "source" } },
+		};
+		resolveConfigAliases(config);
+		// The chain terminates at the now-missing 'intermediate' key, which is
+		// not a provider/model identifier — resolution rewrites the model to
+		// that literal. Pin this documented fail-open-at-terminal behavior.
+		expect(config.agent.scout.model).toBe("intermediate");
+	});
 });
 
 describe("resolveConfigAliases", () => {
@@ -1388,22 +1493,6 @@ describe("plugin wiring", () => {
 		Object.keys(mockFs).forEach((key) => delete mockFs[key]);
 	});
 
-	function makeClient(overrides: {
-		providerList?: unknown;
-		providerError?: unknown;
-	}) {
-		return {
-			provider: {
-				list: jest.fn(async () => {
-					if (overrides.providerError) {
-						return { error: overrides.providerError, data: undefined };
-					}
-					return { error: undefined, data: { all: overrides.providerList ?? [] } };
-				}),
-			},
-		} as any;
-	}
-
 	test("config hook registers /alias command and resolves aliases", async () => {
 		mockFs[ALIAS_FILE] = '{"cheap": "openai/gpt-4o-mini"}';
 		const plugin = await aliasPlugin({
@@ -1574,6 +1663,232 @@ describe("plugin wiring", () => {
 		expect(readAliases()).toEqual({
 			cheap: { model: "openai/gpt-4o-mini" },
 		});
+	});
+
+	test("set verifies against a realistic provider payload with extra fields and record-keyed models", async () => {
+		// Real SDK payloads carry provider-level extras (name, config, ...) and
+		// model entries with extras; depending on SDK version, models may be a
+		// record keyed by model id rather than an array.
+		const plugin = await aliasPlugin({
+			client: makeClient({
+				providerList: [
+					{
+						id: "ollama-cloud",
+						name: "Ollama Cloud",
+						config: { baseURL: "https://ollama.com" },
+						models: {
+							"glm-5.3-flash": {
+								id: "glm-5.3-flash",
+								name: "GLM 5.3 Flash",
+								options: { temperature: 0.7 },
+								variants: { max: { context: 200000 } },
+							},
+						},
+					},
+				],
+			}),
+			directory: "/tmp/proj",
+		} as any);
+		const output: any = { parts: [] };
+		await plugin["command.execute.before"]!(
+			{
+				command: "alias",
+				arguments: "set smart ollama-cloud/glm-5.3-flash max",
+			} as any,
+			output,
+		);
+		expect(output.parts[0].text).toContain("Alias 'smart' set");
+		expect(readAliases()).toEqual({
+			smart: { model: "ollama-cloud/glm-5.3-flash", variant: "max" },
+		});
+	});
+
+	test("config hook rewrites aliased models while preserving sibling fields and untouched sections", async () => {
+		writeReadmeAliasFile();
+		const plugin = await aliasPlugin({
+			client: makeClient({}),
+			directory: "/tmp/proj",
+		} as any);
+		const config: any = {
+			agent: {
+				budget: {
+					model: "cheap",
+					description: "Budget agent",
+					temperature: 0.2,
+					tools: { write: false },
+				},
+				direct: {
+					model: "openai/gpt-4o",
+					prompt: "You are direct.",
+				},
+			},
+			command: {
+				smartcmd: {
+					template: "do things",
+					model: "smart",
+					variant: "low",
+					description: "Smart command",
+				},
+			},
+			provider: {
+				"ollama-cloud": { options: { baseURL: "https://ollama.com" } },
+			},
+			mcp: { myserver: { type: "remote", url: "https://example.com" } },
+		};
+		await plugin.config(config);
+		// Aliased models rewritten, variants applied (alias wins over configured).
+		expect(config.agent.budget.model).toBe("openai/gpt-5.6-luna");
+		expect(config.agent.budget.variant).toBe("max");
+		// Direct provider/model reference untouched.
+		expect(config.agent.direct.model).toBe("openai/gpt-4o");
+		expect(config.agent.direct.variant).toBeUndefined();
+		// Command entry: alias variant overrides the configured one.
+		expect(config.command.smartcmd.model).toBe("ollama-cloud/glm-5.3-flash");
+		expect(config.command.smartcmd.variant).toBe("max");
+		// Sibling fields survive on every touched entry.
+		expect(config.agent.budget.description).toBe("Budget agent");
+		expect(config.agent.budget.temperature).toBe(0.2);
+		expect(config.agent.budget.tools).toEqual({ write: false });
+		expect(config.agent.direct.prompt).toBe("You are direct.");
+		expect(config.command.smartcmd.template).toBe("do things");
+		expect(config.command.smartcmd.description).toBe("Smart command");
+		// Sections the plugin must not touch are deep-equal to their inputs.
+		expect(config.provider).toEqual({
+			"ollama-cloud": { options: { baseURL: "https://ollama.com" } },
+		});
+		expect(config.mcp).toEqual({
+			myserver: { type: "remote", url: "https://example.com" },
+		});
+	});
+});
+
+describe("end-to-end alias lifecycle", () => {
+	beforeEach(() => {
+		Object.keys(mockFs).forEach((key) => delete mockFs[key]);
+	});
+
+	test("set → list shows the new alias", async () => {
+		const setResult = await handleAliasCommand(
+			"set cheap openai/gpt-4o-mini",
+			fetchProvidersOk,
+		);
+		expect(setResult).toContain("Alias 'cheap' set");
+		const listResult = await handleAliasCommand("list", fetchProvidersOk);
+		expect(listResult).toBe("Model aliases:\n  cheap → openai/gpt-4o-mini");
+	});
+
+	test("set → delete → list shows the alias gone", async () => {
+		await handleAliasCommand("set cheap openai/gpt-4o-mini", fetchProvidersOk);
+		const deleteResult = await handleAliasCommand(
+			"delete cheap",
+			fetchProvidersOk,
+		);
+		expect(deleteResult).toContain("Alias 'cheap' deleted");
+		const listResult = await handleAliasCommand("list", fetchProvidersOk);
+		expect(listResult).toBe(
+			"No aliases defined. Use 'alias set <key> <provider/model> [variant]' to add one.",
+		);
+	});
+
+	test("alias set in one session resolves agent models in the next session (restart simulation)", async () => {
+		// Session 1: the user runs /alias set (string form and variant form).
+		await handleAliasCommand("set cheap openai/gpt-4o-mini", fetchProvidersOk);
+		await handleAliasCommand(
+			"set smart ollama-cloud/glm-5.3-flash max",
+			fetchProvidersOk,
+		);
+		// Session 2: a fresh plugin instance boots (restart simulation) and
+		// resolves agent models through the file the previous session wrote.
+		const plugin = await aliasPlugin({
+			client: makeClient({}),
+			directory: "/tmp/proj",
+		} as any);
+		const config: any = {
+			agent: {
+				budget: { model: "cheap" },
+				flagship: { model: "smart" },
+			},
+		};
+		await plugin.config(config);
+		expect(config.agent.budget.model).toBe("openai/gpt-4o-mini");
+		expect(config.agent.flagship.model).toBe("ollama-cloud/glm-5.3-flash");
+		expect(config.agent.flagship.variant).toBe("max");
+	});
+});
+
+describe("alias key shadowing", () => {
+	beforeEach(() => {
+		Object.keys(mockFs).forEach((key) => delete mockFs[key]);
+	});
+
+	test("resolves an agent model that exactly matches a provider/model-shaped alias key", () => {
+		// Documented behavior: alias keys shadow model references, even when
+		// the key looks like a provider/model identifier.
+		mockFs[ALIAS_FILE] =
+			'{"openai/gpt-4o": "openai/gpt-4o-mini"}';
+		const config: any = {
+			agent: { myagent: { model: "openai/gpt-4o" } },
+		};
+		resolveConfigAliases(config);
+		expect(config.agent.myagent.model).toBe("openai/gpt-4o-mini");
+	});
+
+	test("leaves a provider/model model untouched when no alias key shadows it", () => {
+		mockFs[ALIAS_FILE] = '{"cheap": "openai/gpt-4o-mini"}';
+		const config: any = {
+			agent: { myagent: { model: "openai/gpt-4o" } },
+		};
+		resolveConfigAliases(config);
+		expect(config.agent.myagent.model).toBe("openai/gpt-4o");
+	});
+});
+
+describe("realistic alias file", () => {
+	beforeEach(() => {
+		Object.keys(mockFs).forEach((key) => delete mockFs[key]);
+	});
+
+	test("lists every entry with correct chain, variant tag, and no false status markers", async () => {
+		writeReadmeAliasFile();
+		const result = await handleAliasCommand("list", fetchProvidersOk);
+		const lines = result.split("\n");
+		expect(lines[0]).toBe("Model aliases:");
+		// Object entry with variant.
+		expect(lines).toContain("  cheap → openai/gpt-5.6-luna [max]");
+		// Object entry without variant: no tag at all.
+		expect(lines).toContain("  genius → openai/gpt-5.6-sol");
+		// Second object entry with variant.
+		expect(lines).toContain("  smart → ollama-cloud/glm-5.3-flash [max]");
+		// String aliases chaining into an object entry inherit its variant.
+		expect(lines).toContain("  contextscout → cheap → openai/gpt-5.6-luna [max]");
+		expect(lines).toContain("  externalscout → cheap → openai/gpt-5.6-luna [max]");
+		// No false status markers anywhere.
+		expect(result).not.toContain("[unresolved]");
+		expect(result).not.toContain("[cycle]");
+		expect(result).not.toContain("[exceeds");
+	});
+
+	test("resolves every alias in a mixed file through the config hook", () => {
+		writeReadmeAliasFile();
+		const config: any = {
+			agent: {
+				budget: { model: "cheap" },
+				geniusAgent: { model: "genius" },
+				scout: { model: "contextscout" },
+			},
+			command: {
+				external: { model: "externalscout" },
+			},
+		};
+		resolveConfigAliases(config);
+		expect(config.agent.budget.model).toBe("openai/gpt-5.6-luna");
+		expect(config.agent.budget.variant).toBe("max");
+		expect(config.agent.geniusAgent.model).toBe("openai/gpt-5.6-sol");
+		expect(config.agent.geniusAgent.variant).toBeUndefined();
+		expect(config.agent.scout.model).toBe("openai/gpt-5.6-luna");
+		expect(config.agent.scout.variant).toBe("max");
+		expect(config.command.external.model).toBe("openai/gpt-5.6-luna");
+		expect(config.command.external.variant).toBe("max");
 	});
 });
 

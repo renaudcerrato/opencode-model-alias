@@ -177,10 +177,26 @@ function readAliases(): AliasMap {
 
 function writeAliases(aliases: AliasMap): void {
 	ensureConfigDir();
+	// Serialize string entries without a variant in string form: readAliases
+	// rejects object-form entries that point at other aliases, so writing the
+	// normalized object form would corrupt alias-to-alias chains and make the
+	// file unreadable on the next command.
+	const serializable: AliasMap = {};
+	for (const [key, entry] of Object.entries(aliases)) {
+		// defineProperty avoids the __proto__ setter for hostile keys.
+		Object.defineProperty(serializable, key, {
+			value: typeof entry === "string" || !entry.variant
+				? targetModel(entry)
+				: entry,
+			enumerable: true,
+			writable: true,
+			configurable: true,
+		});
+	}
 	const tmp = `${ALIAS_FILE}.${process.pid}.${Date.now()}.tmp`;
 	try {
 		// 0o600: the file may name internal models; keep it owner-only.
-		writeFileSync(tmp, JSON.stringify(aliases, null, 2), { mode: 0o600 });
+		writeFileSync(tmp, JSON.stringify(serializable, null, 2), { mode: 0o600 });
 		renameSync(tmp, ALIAS_FILE);
 	} finally {
 		if (existsSync(tmp)) unlinkSync(tmp);
