@@ -18,6 +18,8 @@ All notable changes to this project will be documented in this file.
 - `/alias list` now shows the effective (own or inherited) variant per alias.
 - Object-form `model` values are validated as `provider/model` identifiers at read time.
 - CI: actions pinned by SHA, least-privilege `permissions`, coverage summary from a single test run.
+- Simplified provider verification: a single `fetchProviders` callback replaces the dual probe/list path; an empty provider list fails closed.
+- Coverage enforced at 100% (statements/branches/functions/lines); README badges auto-updated by CI.
 
 ## [1.0.5] - 2026-04-08
 

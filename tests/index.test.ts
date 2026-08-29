@@ -74,10 +74,21 @@ import pluginModule, {
 	server,
 } from "../src/index";
 
-const ok = async () => true;
 const SUPPORTED_VARIANT = "max";
-const variantOk = async (_model: string, variant: string) =>
-	variant === SUPPORTED_VARIANT;
+
+// Default provider-list stub for handleAliasCommand: knows the models used
+// across the suite, with SUPPORTED_VARIANT listed for glm-5.3-flash.
+const fetchProvidersOk = async () =>
+	[
+		{
+			id: "openai",
+			models: [{ id: "gpt-4o-mini" }, { id: "gpt-4o" }],
+		},
+		{
+			id: "ollama-cloud",
+			models: [{ id: "glm-5.3-flash", variants: { [SUPPORTED_VARIANT]: {} } }],
+		},
+	] as any;
 
 // Exception-safe fs stubbing: stubs are queued and restored in afterEach,
 // so a failing test cannot leak a broken mock into later tests.
@@ -408,7 +419,7 @@ describe("handleAliasCommand", () => {
 	});
 
 	test("help output", async () => {
-		const result = await handleAliasCommand("help", ok, variantOk);
+		const result = await handleAliasCommand("help", fetchProvidersOk);
 		expect(result).toContain("Usage: /alias <subcommand> [options]");
 		// Assert on the subcommand section markers, not just the words.
 		expect(result).toContain("list");
@@ -418,12 +429,12 @@ describe("handleAliasCommand", () => {
 	});
 
 	test("help with empty args", async () => {
-		const result = await handleAliasCommand("", ok, variantOk);
+		const result = await handleAliasCommand("", fetchProvidersOk);
 		expect(result).toContain("Usage: /alias <subcommand> [options]");
 	});
 
 	test("list - empty", async () => {
-		const result = await handleAliasCommand("list", ok, variantOk);
+		const result = await handleAliasCommand("list", fetchProvidersOk);
 		expect(result).toBe(
 			"No aliases defined. Use 'alias set <key> <provider/model> [variant]' to add one.",
 		);
@@ -431,14 +442,14 @@ describe("handleAliasCommand", () => {
 
 	test("list - with aliases", async () => {
 		mockFs[ALIAS_FILE] = '{"cheap": "openai/gpt-4o-mini"}';
-		const result = await handleAliasCommand("list", ok, variantOk);
+		const result = await handleAliasCommand("list", fetchProvidersOk);
 		expect(result).toBe("Model aliases:\n  cheap → openai/gpt-4o-mini");
 	});
 
 	test("list - shows variant from own entry", async () => {
 		mockFs[ALIAS_FILE] =
 			'{"smart": {"model": "ollama-cloud/glm-5.3-flash", "variant": "max"}}';
-		const result = await handleAliasCommand("list", ok, variantOk);
+		const result = await handleAliasCommand("list", fetchProvidersOk);
 		expect(result).toBe(
 			"Model aliases:\n  smart → ollama-cloud/glm-5.3-flash [max]",
 		);
@@ -447,7 +458,7 @@ describe("handleAliasCommand", () => {
 	test("list - shows inherited variant on string alias chain", async () => {
 		mockFs[ALIAS_FILE] =
 			'{"reviewer": "smart", "smart": {"model": "ollama-cloud/glm-5.3-flash", "variant": "max"}}';
-		const result = await handleAliasCommand("list", ok, variantOk);
+		const result = await handleAliasCommand("list", fetchProvidersOk);
 		expect(result).toContain(
 			"reviewer → smart → ollama-cloud/glm-5.3-flash [max]",
 		);
@@ -456,14 +467,14 @@ describe("handleAliasCommand", () => {
 	test("list - fail closed on invalid JSON", async () => {
 		mockFs[ALIAS_FILE] = "not json{";
 		const before = mockFs[ALIAS_FILE];
-		const result = await handleAliasCommand("list", ok, variantOk);
+		const result = await handleAliasCommand("list", fetchProvidersOk);
 		expect(result).toMatch(/^Error:/);
 		expect(mockFs[ALIAS_FILE]).toBe(before);
 	});
 
 	test("list - shows [cycle] status", async () => {
 		mockFs[ALIAS_FILE] = '{"first": "second", "second": "first"}';
-		const result = await handleAliasCommand("list", ok, variantOk);
+		const result = await handleAliasCommand("list", fetchProvidersOk);
 		expect(result).toContain("first → second → first [cycle]");
 	});
 
@@ -477,7 +488,7 @@ describe("handleAliasCommand", () => {
 			entries[`hop${i}`] = i === 17 ? "openai/gpt-4o-mini" : `hop${i + 1}`;
 		}
 		mockFs[ALIAS_FILE] = JSON.stringify(entries);
-		const result = await handleAliasCommand("list", ok, variantOk);
+		const result = await handleAliasCommand("list", fetchProvidersOk);
 		const failedLine = result
 			.split("\n")
 			.find((line) => line.includes("[exceeds 16 hops]"));
@@ -492,20 +503,20 @@ describe("handleAliasCommand", () => {
 			entries[`hop${i}`] = i === 18 ? "openai/gpt-4o-mini" : `hop${i + 1}`;
 		}
 		mockFs[ALIAS_FILE] = JSON.stringify(entries);
-		const result = await handleAliasCommand("list", ok, variantOk);
+		const result = await handleAliasCommand("list", fetchProvidersOk);
 		expect(result).toContain("[exceeds 16 hops]");
 	});
 
 	test("list - shows [unresolved] for non model-id terminal", async () => {
 		mockFs[ALIAS_FILE] = '{"broken": "not-a-model-id"}';
-		const result = await handleAliasCommand("list", ok, variantOk);
+		const result = await handleAliasCommand("list", fetchProvidersOk);
 		expect(result).toContain("broken → not-a-model-id [unresolved]");
 	});
 
 	test("list - shows multi-hop chain", async () => {
 		mockFs[ALIAS_FILE] =
 			'{"source": "intermediate", "intermediate": "target", "target": "openai/gpt-4o-mini"}';
-		const result = await handleAliasCommand("list", ok, variantOk);
+		const result = await handleAliasCommand("list", fetchProvidersOk);
 		expect(result).toContain(
 			"source → intermediate → target → openai/gpt-4o-mini",
 		);
@@ -514,8 +525,7 @@ describe("handleAliasCommand", () => {
 	test("set - success", async () => {
 		const result = await handleAliasCommand(
 			"set cheap openai/gpt-4o-mini",
-			ok,
-			variantOk,
+			fetchProvidersOk,
 		);
 		expect(result).toBe(
 			"Alias 'cheap' set to 'openai/gpt-4o-mini'. Please restart OpenCode for the change to take effect.",
@@ -532,8 +542,7 @@ describe("handleAliasCommand", () => {
 	test("set - with variant writes object form", async () => {
 		const result = await handleAliasCommand(
 			"set smart ollama-cloud/glm-5.3-flash max",
-			ok,
-			variantOk,
+			fetchProvidersOk,
 		);
 		expect(result).toBe(
 			"Alias 'smart' set to 'ollama-cloud/glm-5.3-flash' (variant: max). Please restart OpenCode for the change to take effect.",
@@ -546,14 +555,12 @@ describe("handleAliasCommand", () => {
 	test("set - unsupported variant rejected with supported list", async () => {
 		const result = await handleAliasCommand(
 			"set smart ollama-cloud/glm-5.3-flash turbo",
-			ok,
-			variantOk,
 			async () => [
 				{
 					id: "ollama-cloud",
 					models: [{ id: "glm-5.3-flash", variants: { max: {}, low: {} } }],
 				},
-			],
+			] as any,
 		);
 		expect(result).toBe(
 			"Error: variant 'turbo' is not listed for model 'ollama-cloud/glm-5.3-flash'. Supported variants: low, max.",
@@ -564,8 +571,7 @@ describe("handleAliasCommand", () => {
 		mockFs[ALIAS_FILE] = '{"smart": "ollama-cloud/glm-5.3-flash"}';
 		const result = await handleAliasCommand(
 			"set reviewer smart max",
-			ok,
-			variantOk,
+			fetchProvidersOk,
 		);
 		expect(result).toMatch(/cannot be applied to alias target/);
 	});
@@ -575,8 +581,7 @@ describe("handleAliasCommand", () => {
 			'{"smart": {"model": "ollama-cloud/glm-5.3-flash", "variant": "max"}}';
 		const result = await handleAliasCommand(
 			"set smart ollama-cloud/glm-5.3-flash",
-			ok,
-			variantOk,
+			fetchProvidersOk,
 		);
 		expect(result).not.toContain("variant");
 		expect(readAliases()).toEqual({
@@ -589,8 +594,7 @@ describe("handleAliasCommand", () => {
 		const before = mockFs[ALIAS_FILE];
 		const result = await handleAliasCommand(
 			"set third first",
-			ok,
-			variantOk,
+			fetchProvidersOk,
 		);
 		expect(result).toMatch(/creates a cycle/);
 		expect(mockFs[ALIAS_FILE]).toBe(before);
@@ -603,7 +607,7 @@ describe("handleAliasCommand", () => {
 		}
 		mockFs[ALIAS_FILE] = JSON.stringify(entries);
 		const before = mockFs[ALIAS_FILE];
-		const result = await handleAliasCommand("set entry hop1", ok, variantOk);
+		const result = await handleAliasCommand("set entry hop1", fetchProvidersOk);
 		expect(result).toMatch(/exceeds the 16-hop resolution limit/);
 		expect(mockFs[ALIAS_FILE]).toBe(before);
 	});
@@ -611,8 +615,7 @@ describe("handleAliasCommand", () => {
 	test("set - rejects invalid provider/model identifier", async () => {
 		const result = await handleAliasCommand(
 			"set cheap gpt-4o-mini",
-			ok,
-			variantOk,
+			fetchProvidersOk,
 		);
 		expect(result).toBe(
 			"Error: 'gpt-4o-mini' is not a valid provider/model identifier",
@@ -624,8 +627,7 @@ describe("handleAliasCommand", () => {
 		mockFs[ALIAS_FILE] = '{"smart": "ollama-cloud/glm-5.3-flash"}';
 		const result = await handleAliasCommand(
 			"set reviewer smart",
-			ok,
-			variantOk,
+			fetchProvidersOk,
 		);
 		expect(result).toContain("Alias 'reviewer' set to 'smart'");
 		expect(readAliases()).toEqual({
@@ -637,14 +639,12 @@ describe("handleAliasCommand", () => {
 	test("set - model id with slash in model part", async () => {
 		const result = await handleAliasCommand(
 			"set deep openai/org/gpt-4o-mini",
-			ok,
-			variantOk,
 			async () => [
 				{
 					id: "openai",
 					models: [{ id: "org/gpt-4o-mini", variants: { max: {} } }],
 				},
-			],
+			] as any,
 		);
 		expect(result).toContain("Alias 'deep' set");
 	});
@@ -652,14 +652,12 @@ describe("handleAliasCommand", () => {
 	test("set - no-variants hint when model lists none", async () => {
 		const result = await handleAliasCommand(
 			"set smart ollama-cloud/glm-5.3-flash max",
-			ok,
-			variantOk,
 			async () => [
 				{
 					id: "ollama-cloud",
 					models: [{ id: "glm-5.3-flash" }],
 				},
-			],
+			] as any,
 		);
 		expect(result).toContain("The model lists no variants.");
 	});
@@ -681,8 +679,7 @@ describe("handleAliasCommand", () => {
 		});
 		const result = await handleAliasCommand(
 			"set expensive openai/gpt-4o",
-			ok,
-			variantOk,
+			fetchProvidersOk,
 		);
 		expect(result).toMatch(/changed concurrently/);
 		expect(mockFs[ALIAS_FILE]).toBe('{"cheap": "openai/gpt-4o-mini"}');
@@ -701,7 +698,7 @@ describe("handleAliasCommand", () => {
 			}
 			return mockFs[path];
 		});
-		const result = await handleAliasCommand("delete cheap", ok, variantOk);
+		const result = await handleAliasCommand("delete cheap", fetchProvidersOk);
 		expect(result).toMatch(/changed concurrently/);
 		expect(mockFs[ALIAS_FILE]).toBe('{"cheap": "openai/gpt-4o-mini"}');
 	});
@@ -723,8 +720,7 @@ describe("handleAliasCommand", () => {
 		});
 		const result = await handleAliasCommand(
 			"set expensive openai/gpt-4o",
-			ok,
-			variantOk,
+			fetchProvidersOk,
 		);
 		expect(result).toMatch(/alias file unreadable/);
 		expect(mockFs[ALIAS_FILE]).toBe('{"cheap": "openai/gpt-4o-mini"}');
@@ -745,7 +741,7 @@ describe("handleAliasCommand", () => {
 			}
 			return mockFs[path];
 		});
-		const result = await handleAliasCommand("delete cheap", ok, variantOk);
+		const result = await handleAliasCommand("delete cheap", fetchProvidersOk);
 		expect(result).toMatch(/alias file unreadable/);
 		expect(mockFs[ALIAS_FILE]).toBe('{"cheap": "openai/gpt-4o-mini"}');
 	});
@@ -753,14 +749,12 @@ describe("handleAliasCommand", () => {
 	test("set - fetchProviders positive path writes object form", async () => {
 		const result = await handleAliasCommand(
 			"set smart ollama-cloud/glm-5.3-flash max",
-			ok,
-			variantOk,
 			async () => [
 				{
 					id: "ollama-cloud",
 					models: [{ id: "glm-5.3-flash", variants: { max: {}, low: {} } }],
 				},
-			],
+			] as any,
 		);
 		expect(result).toContain("Alias 'smart' set");
 		expect(readAliases()).toEqual({
@@ -771,43 +765,35 @@ describe("handleAliasCommand", () => {
 	test("set - empty provider list fails closed", async () => {
 		const result = await handleAliasCommand(
 			"set cheap openai/gpt-4o-mini",
-			ok,
-			variantOk,
-			async () => [],
+			async () => [] as any,
 		);
 		expect(result).toBe(
 			"Error: model 'openai/gpt-4o-mini' is not available from a known provider",
 		);
 	});
 
-	test("set - compat probe rejects unavailable model", async () => {
+	test("set - provider list rejects unavailable model", async () => {
 		const result = await handleAliasCommand(
 			"set cheap openai/gpt-4o-mini",
-			async () => false,
-			variantOk,
+			async () => [{ id: "other", models: [] }] as any,
 		);
-		// The compat probe throws; the caller wraps it as "could not verify".
 		expect(result).toBe(
-			"Error: could not verify model 'openai/gpt-4o-mini': model 'openai/gpt-4o-mini' is not available from a known provider",
+			"Error: model 'openai/gpt-4o-mini' is not available from a known provider",
 		);
 	});
 
 	test("set - alias target resolving to non-identifier rejected", async () => {
 		mockFs[ALIAS_FILE] = '{"dead": "not-an-id"}';
-		const result = await handleAliasCommand("set x dead", ok, variantOk);
+		const result = await handleAliasCommand("set x dead", fetchProvidersOk);
 		expect(result).toBe(
 			"Error: alias 'x' does not resolve to a provider/model identifier",
 		);
 	});
 
-	test("set - compat probe accepts supported variant", async () => {
-		// No fetchProviders: the compat path probes variant support through
-		// the injected callback (which consults provider metadata), covering
-		// isVariantInModel end-to-end.
+	test("set - provider list accepts supported variant", async () => {
 		const result = await handleAliasCommand(
 			"set smart ollama-cloud/glm-5.3-flash max",
-			ok,
-			variantOk,
+			fetchProvidersOk,
 		);
 		expect(result).toContain("Alias 'smart' set");
 		expect(readAliases()).toEqual({
@@ -815,22 +801,19 @@ describe("handleAliasCommand", () => {
 		});
 	});
 
-	test("set - compat probe rejects unsupported variant", async () => {
+	test("set - provider list rejects unsupported variant", async () => {
 		const result = await handleAliasCommand(
 			"set smart ollama-cloud/glm-5.3-flash turbo",
-			ok,
-			variantOk,
+			fetchProvidersOk,
 		);
 		expect(result).toBe(
-			"Error: could not verify model 'ollama-cloud/glm-5.3-flash': variant 'turbo' is not listed for model 'ollama-cloud/glm-5.3-flash'",
+			"Error: variant 'turbo' is not listed for model 'ollama-cloud/glm-5.3-flash'. Supported variants: max.",
 		);
 	});
 
 	test("set - malformed provider entries are skipped, valid ones still work", async () => {
 		const result = await handleAliasCommand(
 			"set cheap openai/gpt-4o-mini",
-			ok,
-			variantOk,
 			async () => [
 				null,
 				{ id: 42 },
@@ -843,8 +826,6 @@ describe("handleAliasCommand", () => {
 	test("set - variant union across duplicate provider ids", async () => {
 		const result = await handleAliasCommand(
 			"set smart ollama-cloud/glm-5.3-flash turbo",
-			ok,
-			variantOk,
 			async () => [
 				{
 					id: "ollama-cloud",
@@ -865,8 +846,6 @@ describe("handleAliasCommand", () => {
 	test("set - malformed variants metadata skipped", async () => {
 		const result = await handleAliasCommand(
 			"set smart ollama-cloud/glm-5.3-flash max",
-			ok,
-			variantOk,
 			async () => [
 				{
 					id: "ollama-cloud",
@@ -883,21 +862,165 @@ describe("handleAliasCommand", () => {
 		expect(result).toContain("Alias 'smart' set");
 	});
 
+	test("set - malformed model candidates skipped during variant lookup", async () => {
+		const result = await handleAliasCommand(
+			"set smart ollama-cloud/glm-5.3-flash max",
+			async () => [
+				{
+					id: "ollama-cloud",
+					models: [
+						null,
+						{ id: 42 },
+						{ id: "other-model", variants: { decoy: {} } },
+						{ id: "glm-5.3-flash", variants: { max: {} } },
+					],
+				},
+			] as any,
+		);
+		// The malformed candidates are skipped; the real one supplies "max".
+		expect(result).toContain("Alias 'smart' set");
+	});
+
+	test("set - provider without models field is skipped", async () => {
+		const result = await handleAliasCommand(
+			"set cheap openai/gpt-4o-mini",
+			async () => [{ id: "empty" }] as any,
+		);
+		expect(result).toBe(
+			"Error: model 'openai/gpt-4o-mini' is not available from a known provider",
+		);
+	});
+
+	test("set - provider without models field skips variant lookup", async () => {
+		// The model is available via one provider; a models-less provider must
+		// not break the variant check (its models ?? {} yields an empty scan).
+		const result = await handleAliasCommand(
+			"set smart ollama-cloud/glm-5.3-flash max",
+			async () => [
+				{ id: "empty" },
+				{
+					id: "ollama-cloud",
+					models: [{ id: "glm-5.3-flash", variants: { max: {} } }],
+				},
+			] as any,
+		);
+		expect(result).toContain("Alias 'smart' set");
+	});
+
+	test("set - models-less provider during variant check yields no-variants hint", async () => {
+		// The model matches via a provider entry with no models field, so the
+		// variant scan finds nothing and the hint says the model lists none.
+		const result = await handleAliasCommand(
+			"set smart ollama-cloud/glm-5.3-flash max",
+			async () => [
+				{ id: "ollama-cloud", models: [{ id: "glm-5.3-flash" }] },
+				{ id: "ollama-cloud" },
+			] as any,
+		);
+		expect(result).toBe(
+			"Error: variant 'max' is not listed for model 'ollama-cloud/glm-5.3-flash'. The model lists no variants.",
+		);
+	});
+
+	test("set - non-Error throw surfaces fallback message", async () => {
+		const result = await handleAliasCommand(
+			"set cheap openai/gpt-4o-mini",
+			// eslint-disable-next-line @typescript-eslint/require-await
+			(async () => {
+				throw "just a string"; // non-Error rejection
+			}) as any,
+		);
+		expect(result).toBe(
+			"Error: could not verify model 'openai/gpt-4o-mini'",
+		);
+	});
+
+	test("readAliases - non-Error throw surfaces as unreadable", () => {
+		stubFs("readFileSync", () => {
+			throw "just a string"; // non-Error rejection
+		});
+		expect(() => readAliases()).toThrow(/alias file unreadable/);
+	});
+
+	test("writeAliases - non-Error throw propagates", () => {
+		stubFs("writeFileSync", () => {
+			throw "just a string"; // non-Error rejection
+		});
+		expect(() => writeAliases({ cheap: "openai/gpt-4o-mini" })).toThrow(
+			"just a string",
+		);
+	});
+
+	test("set - non-Error throw in concurrency check is wrapped as unreadable", async () => {
+		mockFs[ALIAS_FILE] = '{"cheap": "openai/gpt-4o-mini"}';
+		let reads = 0;
+		stubFs("readFileSync", (path: string) => {
+			if (path === ALIAS_FILE) {
+				reads++;
+				if (reads >= 2) throw 42; // non-Error rejection
+				return mockFs[path];
+			}
+			return mockFs[path];
+		});
+		const result = await handleAliasCommand(
+			"set expensive openai/gpt-4o",
+			fetchProvidersOk,
+		);
+		// readAliases wraps any read failure (Error or not) into a proper Error.
+		expect(result).toMatch(/^Error: alias file unreadable:/);
+		expect(mockFs[ALIAS_FILE]).toBe('{"cheap": "openai/gpt-4o-mini"}');
+	});
+
+	test("delete - non-Error throw in concurrency check is wrapped as unreadable", async () => {
+		mockFs[ALIAS_FILE] = '{"cheap": "openai/gpt-4o-mini"}';
+		let reads = 0;
+		stubFs("readFileSync", (path: string) => {
+			if (path === ALIAS_FILE) {
+				reads++;
+				if (reads >= 2) throw 42; // non-Error rejection
+				return mockFs[path];
+			}
+			return mockFs[path];
+		});
+		const result = await handleAliasCommand("delete cheap", fetchProvidersOk);
+		expect(result).toMatch(/^Error: alias file unreadable:/);
+		expect(mockFs[ALIAS_FILE]).toBe('{"cheap": "openai/gpt-4o-mini"}');
+	});
+
+	test("set - non-Error write throw surfaces fallback message", async () => {
+		stubFs("renameSync", () => {
+			throw 42; // non-Error rejection
+		});
+		const result = await handleAliasCommand(
+			"set cheap openai/gpt-4o-mini",
+			fetchProvidersOk,
+		);
+		expect(result).toBe("Error: could not write alias file");
+	});
+
+	test("delete - non-Error write throw surfaces fallback message", async () => {
+		mockFs[ALIAS_FILE] = '{"cheap": "openai/gpt-4o-mini"}';
+		stubFs("renameSync", () => {
+			throw 42; // non-Error rejection
+		});
+		const result = await handleAliasCommand("delete cheap", fetchProvidersOk);
+		expect(result).toBe("Error: could not write alias file");
+	});
+
 	test("set - missing key", async () => {
-		const result = await handleAliasCommand("set", ok, variantOk);
+		const result = await handleAliasCommand("set", fetchProvidersOk);
 		expect(result).toBe("Error: key is required for 'set' subcommand");
 	});
 
 	test("set - missing value", async () => {
-		const result = await handleAliasCommand("set cheap", ok, variantOk);
+		const result = await handleAliasCommand("set cheap", fetchProvidersOk);
 		expect(result).toBe("Error: value is required for 'set' subcommand");
 	});
 
 	test("set - too many arguments", async () => {
 		const result = await handleAliasCommand(
 			"set key model variant extra",
-			ok,
-			variantOk,
+			fetchProvidersOk,
 		);
 		expect(result).toMatch(/too many arguments/);
 	});
@@ -905,9 +1028,7 @@ describe("handleAliasCommand", () => {
 	test("set - model unavailable", async () => {
 		const result = await handleAliasCommand(
 			"set cheap openai/gpt-4o-mini",
-			ok,
-			variantOk,
-			async () => [{ id: "other", models: [] }],
+			async () => [{ id: "other", models: [] }] as any,
 		);
 		expect(result).toBe(
 			"Error: model 'openai/gpt-4o-mini' is not available from a known provider",
@@ -921,7 +1042,6 @@ describe("handleAliasCommand", () => {
 			async () => {
 				throw new Error("offline");
 			},
-			variantOk,
 		);
 		expect(result).toMatch(/^Error: could not verify model/);
 		expect(result).toContain("offline");
@@ -930,8 +1050,7 @@ describe("handleAliasCommand", () => {
 	test("set - unsupported variant rejected", async () => {
 		const result = await handleAliasCommand(
 			"set smart ollama-cloud/glm-5.3-flash turbo",
-			ok,
-			variantOk,
+			fetchProvidersOk,
 		);
 		expect(result).toContain("variant 'turbo' is not listed");
 		expect(mockFs[ALIAS_FILE]).toBeUndefined();
@@ -940,7 +1059,6 @@ describe("handleAliasCommand", () => {
 	test("set - variant check error surfaced", async () => {
 		const result = await handleAliasCommand(
 			"set smart ollama-cloud/glm-5.3-flash max",
-			ok,
 			async () => {
 				throw new Error("metadata missing");
 			},
@@ -954,8 +1072,7 @@ describe("handleAliasCommand", () => {
 		const before = mockFs[ALIAS_FILE];
 		const result = await handleAliasCommand(
 			"set cheap openai/gpt-4o-mini",
-			ok,
-			variantOk,
+			fetchProvidersOk,
 		);
 		expect(result).toMatch(/^Error:/);
 		expect(mockFs[ALIAS_FILE]).toBe(before);
@@ -969,8 +1086,7 @@ describe("handleAliasCommand", () => {
 		});
 		const result = await handleAliasCommand(
 			"set cheap openai/gpt-4o-mini",
-			ok,
-			variantOk,
+			fetchProvidersOk,
 		);
 		expect(result).toMatch(/alias file unreadable/);
 	});
@@ -978,8 +1094,7 @@ describe("handleAliasCommand", () => {
 	test("set - __proto__ key persisted as own property", async () => {
 		const result = await handleAliasCommand(
 			"set __proto__ openai/gpt-4o-mini",
-			ok,
-			variantOk,
+			fetchProvidersOk,
 		);
 		expect(result).toContain("Alias '__proto__' set");
 		const stored = JSON.parse(mockFs[ALIAS_FILE]);
@@ -990,7 +1105,7 @@ describe("handleAliasCommand", () => {
 	test("delete - success", async () => {
 		mockFs[ALIAS_FILE] =
 			'{"cheap": "openai/gpt-4o-mini", "other": "openai/gpt-4o"}';
-		const result = await handleAliasCommand("delete cheap", ok, variantOk);
+		const result = await handleAliasCommand("delete cheap", fetchProvidersOk);
 		expect(result).toBe(
 			"Alias 'cheap' deleted. Please restart OpenCode for the change to take effect.",
 		);
@@ -1003,7 +1118,7 @@ describe("handleAliasCommand", () => {
 	test("delete - fail closed on invalid JSON", async () => {
 		mockFs[ALIAS_FILE] = "broken{";
 		const before = mockFs[ALIAS_FILE];
-		const result = await handleAliasCommand("delete cheap", ok, variantOk);
+		const result = await handleAliasCommand("delete cheap", fetchProvidersOk);
 		expect(result).toMatch(/^Error:/);
 		expect(mockFs[ALIAS_FILE]).toBe(before);
 	});
@@ -1014,7 +1129,7 @@ describe("handleAliasCommand", () => {
 			error.code = "EACCES";
 			throw error;
 		});
-		const result = await handleAliasCommand("delete cheap", ok, variantOk);
+		const result = await handleAliasCommand("delete cheap", fetchProvidersOk);
 		expect(result).toMatch(/alias file unreadable/);
 	});
 
@@ -1024,7 +1139,7 @@ describe("handleAliasCommand", () => {
 			if (path.endsWith(".tmp")) throw new Error("disk full");
 			mockFs[path] = content;
 		});
-		const result = await handleAliasCommand("delete cheap", ok, variantOk);
+		const result = await handleAliasCommand("delete cheap", fetchProvidersOk);
 		// The write error is surfaced (not swallowed) and nothing is written.
 		expect(result).toMatch(/^Error: disk full$/);
 		expect(mockFs[ALIAS_FILE]).toBe('{"cheap": "openai/gpt-4o-mini"}');
@@ -1037,25 +1152,24 @@ describe("handleAliasCommand", () => {
 		});
 		const result = await handleAliasCommand(
 			"set cheap openai/gpt-4o-mini",
-			ok,
-			variantOk,
+			fetchProvidersOk,
 		);
 		expect(result).toMatch(/^Error: disk full$/);
 		expect(mockFs[ALIAS_FILE]).toBeUndefined();
 	});
 
 	test("delete - missing key", async () => {
-		const result = await handleAliasCommand("delete", ok, variantOk);
+		const result = await handleAliasCommand("delete", fetchProvidersOk);
 		expect(result).toBe("Error: key is required for 'delete' subcommand");
 	});
 
 	test("delete - non-existent alias", async () => {
-		const result = await handleAliasCommand("delete nonexistent", ok, variantOk);
+		const result = await handleAliasCommand("delete nonexistent", fetchProvidersOk);
 		expect(result).toBe("Error: alias 'nonexistent' does not exist");
 	});
 
 	test("unknown subcommand", async () => {
-		const result = await handleAliasCommand("foobar", ok, variantOk);
+		const result = await handleAliasCommand("foobar", fetchProvidersOk);
 		expect(result).toBe(
 			"Unknown subcommand. Use 'alias help' for usage information.",
 		);
@@ -1064,8 +1178,7 @@ describe("handleAliasCommand", () => {
 	test("argument parsing collapses extra whitespace", async () => {
 		const result = await handleAliasCommand(
 			"set   cheap    openai/gpt-4o-mini",
-			ok,
-			variantOk,
+			fetchProvidersOk,
 		);
 		expect(result).toContain("Alias 'cheap' set to 'openai/gpt-4o-mini'");
 	});
@@ -1074,8 +1187,7 @@ describe("handleAliasCommand", () => {
 		mockFs[ALIAS_FILE] = '{"my": "openai/gpt-4o-mini"}';
 		const result = await handleAliasCommand(
 			"delete my key",
-			ok,
-			variantOk,
+			fetchProvidersOk,
 		);
 		// "my key" is split into ["my", "key"]; only "my" is considered.
 		expect(result).toContain("Alias 'my' deleted");
@@ -1343,6 +1455,23 @@ describe("plugin wiring", () => {
 		expect(output.parts[0].ignored).toBe(true);
 	});
 
+	test("command.execute.before catches non-Error throws", async () => {
+		const plugin = await aliasPlugin({
+			client: makeClient({}),
+			directory: "/tmp/proj",
+		} as any);
+		const output: any = { parts: [] };
+		// arguments: undefined makes args.trim() throw a TypeError (an Error),
+		// so stub the command handler input to throw a non-Error instead.
+		await plugin["command.execute.before"]!(
+			{ command: "alias", get arguments() { throw "boom"; } } as any,
+			output,
+		);
+		expect(output.parts).toHaveLength(1);
+		expect(output.parts[0].text).toBe("Error: alias command failed");
+		expect(output.parts[0].ignored).toBe(true);
+	});
+
 	test("command.execute.before intercepts alias command", async () => {
 		const plugin = await aliasPlugin({
 			client: makeClient({}),
@@ -1422,6 +1551,29 @@ describe("plugin wiring", () => {
 			output,
 		);
 		expect(output.parts[0].text).toMatch(/^Error: could not verify model/);
+	});
+
+	test("set through the plugin fetches the provider list and succeeds", async () => {
+		const plugin = await aliasPlugin({
+			client: makeClient({
+				providerList: [
+					{
+						id: "openai",
+						models: [{ id: "gpt-4o-mini" }],
+					},
+				],
+			}),
+			directory: "/tmp/proj",
+		} as any);
+		const output: any = { parts: [] };
+		await plugin["command.execute.before"]!(
+			{ command: "alias", arguments: "set cheap openai/gpt-4o-mini" } as any,
+			output,
+		);
+		expect(output.parts[0].text).toContain("Alias 'cheap' set");
+		expect(readAliases()).toEqual({
+			cheap: { model: "openai/gpt-4o-mini" },
+		});
 	});
 });
 

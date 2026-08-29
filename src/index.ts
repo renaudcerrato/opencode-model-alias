@@ -151,14 +151,15 @@ function readAliases(): AliasMap {
 	// RAW parsed values: parseAliasTarget normalizes strings to { model },
 	// which would false-positive the alias check here. String entries are
 	// exempt from the format check — they may point at other aliases.
+	// parseAliasTarget already validated that object-form `model` is a
+	// non-empty string, so no typeof re-check is needed here.
 	for (const [key, rawValue] of Object.entries(parsed)) {
 		if (
 			typeof rawValue === "object" &&
 			rawValue !== null &&
 			!Array.isArray(rawValue)
 		) {
-			const model = (rawValue as Record<string, unknown>).model;
-			if (typeof model !== "string") continue;
+			const model = (rawValue as Record<string, unknown>).model as string;
 			if (hasAlias(result, model)) {
 				throw new Error(
 					`alias '${key}' must target a direct provider/model identifier, not another alias`,
@@ -208,7 +209,9 @@ function getAliasChain(
 	const values = [current];
 	const visited = new Set<string>();
 
-	for (let depth = 0; depth <= MAX_ALIAS_DEPTH; depth++) {
+	// The loop always returns: either the chain ends (no alias), a cycle is
+	// detected, or the depth cap is hit at depth === MAX_ALIAS_DEPTH.
+	for (let depth = 0; ; depth++) {
 		if (!hasAlias(aliases, current)) {
 			return { values };
 		}
@@ -223,10 +226,6 @@ function getAliasChain(
 		current = targetModel(aliases[current]);
 		values.push(current);
 	}
-
-	// Unreachable: the loop returns at depth === MAX_ALIAS_DEPTH. Kept to
-	// satisfy the compiler's exhaustive-return check.
-	return { values, failure: "depth" };
 }
 
 function resolveAliasDetails(
@@ -309,10 +308,6 @@ function resolveConfigAliases(config: Config): void {
 	applyAliasesToConfig(config, aliases);
 }
 
-type ModelAvailability = (model: string) => Promise<boolean>;
-
-type VariantSupport = (model: string, variant: string) => Promise<boolean>;
-
 type ProviderListEntry = {
 	id?: unknown;
 	models?: unknown;
@@ -333,23 +328,16 @@ function isModelInProviders(
 	});
 }
 
-function isVariantInModel(
-	providers: ProviderListEntry[],
-	model: string,
-	variant: string,
-): boolean {
-	return getSupportedVariants(providers, model).has(variant);
-}
-
 // Returns the set of variant ids listed in the model's provider metadata.
 // The v1 SDK types omit `variants`, but runtime metadata carries it.
+// Precondition: `model` is a provider/model identifier (contains a slash) —
+// callers validate with isModelIdentifier first.
 function getSupportedVariants(
 	providers: ProviderListEntry[],
 	model: string,
 ): Set<string> {
 	// Split on the first slash only: model ids may contain slashes.
 	const slash = model.indexOf("/");
-	if (slash < 0) return new Set();
 	const providerID = model.slice(0, slash);
 	const modelID = model.slice(slash + 1);
 	const supported = new Set<string>();
@@ -388,38 +376,7 @@ export {
 	writeAliases,
 };
 
-type FetchProviders = () => Promise<unknown>;
-
-// Sentinel returned by the compat fallback: a successful probe already
-// proved availability, so the caller must skip the provider-list re-check.
-const PROVIDERS_VERIFIED = Symbol("providers-verified");
-
-type ProviderVerification = ProviderListEntry[] | typeof PROVIDERS_VERIFIED;
-
-// Fallback for direct callers that don't supply fetchProviders: probes the
-// model/variant through the injected availability callbacks. Returns the
-// PROVIDERS_VERIFIED sentinel — the caller must treat it as "already
-// verified" and skip the list re-check.
-async function fetchProviderListCompat(
-	isModelAvailable: ModelAvailability,
-	isVariantSupported: VariantSupport,
-	value: string,
-	variant: string | undefined,
-): Promise<ProviderVerification> {
-	if (variant) {
-		const supported = await isVariantSupported(value, variant);
-		if (!supported) {
-			throw new Error(
-				`variant '${variant}' is not listed for model '${value}'`,
-			);
-		}
-	}
-	const available = await isModelAvailable(value);
-	if (!available) {
-		throw new Error(`model '${value}' is not available from a known provider`);
-	}
-	return PROVIDERS_VERIFIED;
-}
+type FetchProviders = () => Promise<ProviderListEntry[]>;
 
 function aliasHelp(): string {
 	return `Usage: /alias <subcommand> [options]
@@ -456,7 +413,7 @@ function aliasList(): string {
 	try {
 		aliases = readAliases();
 	} catch (error) {
-		return `Error: ${error instanceof Error ? error.message : "could not read alias file"}`;
+		return `Error: ${(error as Error).message}`;
 	}
 	if (Object.keys(aliases).length === 0) {
 		return "No aliases defined. Use 'alias set <key> <provider/model> [variant]' to add one.";
@@ -488,9 +445,7 @@ function aliasList(): string {
 
 async function aliasSet(
 	parts: string[],
-	isModelAvailable: ModelAvailability,
-	isVariantSupported: VariantSupport,
-	fetchProviders: FetchProviders | undefined,
+	fetchProviders: FetchProviders,
 ): Promise<string> {
 	const key = parts[1];
 	const value = parts[2];
@@ -508,7 +463,7 @@ async function aliasSet(
 	try {
 		aliases = readAliases();
 	} catch (error) {
-		return `Error: ${error instanceof Error ? error.message : "could not read alias file"}`;
+		return `Error: ${(error as Error).message}`;
 	}
 	const candidateAliases: AliasMap = { ...aliases, [key]: { model: value } };
 	const resolution = resolveAliasDetails(key, candidateAliases);
@@ -531,41 +486,29 @@ async function aliasSet(
 		if (!isModelIdentifier(value)) {
 			return `Error: '${value}' is not a valid provider/model identifier`;
 		}
-		// Single provider-list fetch shared by both checks. When only the
-		// availability callbacks are available (no fetchProviders), a
-		// successful probe means "available" — skip the list re-check.
-		let verification: ProviderVerification;
+		// Single provider-list fetch shared by both the availability and the
+		// variant checks. An empty list means nothing is authenticated, so
+		// the model cannot be verified — fail closed rather than skipping
+		// validation.
+		let providers: ProviderListEntry[];
 		try {
-			verification = fetchProviders
-				? ((await fetchProviders()) as ProviderVerification)
-				: await fetchProviderListCompat(
-						isModelAvailable,
-						isVariantSupported,
-						value,
-						variant,
-					);
+			providers = await fetchProviders();
 		} catch (error) {
 			const message = error instanceof Error ? `: ${error.message}` : "";
 			return `Error: could not verify model '${value}'${message}`;
 		}
-		// PROVIDERS_VERIFIED means the compat probe already proved availability.
-		// A real provider list must be non-empty; an empty list means nothing
-		// is authenticated/configured, so the model cannot be verified — fail
-		// closed rather than silently skipping validation.
-		if (verification !== PROVIDERS_VERIFIED) {
-			const available = isModelInProviders(verification, value);
-			if (!available) {
-				return `Error: model '${value}' is not available from a known provider`;
-			}
-			if (variant) {
-				const supported = getSupportedVariants(verification, value);
-				if (!supported.has(variant)) {
-					const hint =
-						supported.size > 0
-							? ` Supported variants: ${[...supported].sort().join(", ")}.`
-							: " The model lists no variants.";
-					return `Error: variant '${variant}' is not listed for model '${value}'.${hint}`;
-				}
+		const available = isModelInProviders(providers, value);
+		if (!available) {
+			return `Error: model '${value}' is not available from a known provider`;
+		}
+		if (variant) {
+			const supported = getSupportedVariants(providers, value);
+			if (!supported.has(variant)) {
+				const hint =
+					supported.size > 0
+						? ` Supported variants: ${[...supported].sort().join(", ")}.`
+						: " The model lists no variants.";
+				return `Error: variant '${variant}' is not listed for model '${value}'.${hint}`;
 			}
 		}
 	}
@@ -573,7 +516,7 @@ async function aliasSet(
 	try {
 		current = readAliases();
 	} catch (error) {
-		return `Error: ${error instanceof Error ? error.message : "could not read alias file"}`;
+		return `Error: ${(error as Error).message}`;
 	}
 	if (JSON.stringify(current) !== JSON.stringify(aliases)) {
 		return "Error: alias file changed concurrently, please retry";
@@ -603,7 +546,7 @@ function aliasDelete(parts: string[]): string {
 	try {
 		aliases = readAliases();
 	} catch (error) {
-		return `Error: ${error instanceof Error ? error.message : "could not read alias file"}`;
+		return `Error: ${(error as Error).message}`;
 	}
 	if (!hasAlias(aliases, key)) {
 		return `Error: alias '${key}' does not exist`;
@@ -614,7 +557,7 @@ function aliasDelete(parts: string[]): string {
 	try {
 		current = readAliases();
 	} catch (error) {
-		return `Error: ${error instanceof Error ? error.message : "could not read alias file"}`;
+		return `Error: ${(error as Error).message}`;
 	}
 	if (JSON.stringify(current) !== JSON.stringify(aliases)) {
 		return "Error: alias file changed concurrently, please retry";
@@ -630,9 +573,7 @@ function aliasDelete(parts: string[]): string {
 
 async function handleAliasCommand(
 	args: string,
-	isModelAvailable: ModelAvailability,
-	isVariantSupported: VariantSupport,
-	fetchProviders?: FetchProviders,
+	fetchProviders: FetchProviders,
 ): Promise<string> {
 	const parts = args.trim().split(/\s+/);
 	const subcommand = parts[0] || "help";
@@ -644,7 +585,7 @@ async function handleAliasCommand(
 		return aliasList();
 	}
 	if (subcommand === "set") {
-		return aliasSet(parts, isModelAvailable, isVariantSupported, fetchProviders);
+		return aliasSet(parts, fetchProviders);
 	}
 	if (subcommand === "delete") {
 		return aliasDelete(parts);
@@ -653,7 +594,7 @@ async function handleAliasCommand(
 }
 
 export const aliasPlugin: Plugin = async ({ client, directory }) => {
-	const fetchProviderList = async () => {
+	const fetchProviderList = async (): Promise<ProviderListEntry[]> => {
 		const response = await client.provider.list({ query: { directory } });
 		if (response.error) {
 			throw new Error(
@@ -665,19 +606,6 @@ export const aliasPlugin: Plugin = async ({ client, directory }) => {
 			throw new Error("provider list returned an unexpected shape");
 		}
 		return data.all;
-	};
-
-	// The availability callbacks are required by handleAliasCommand's
-	// signature but unused in production: fetchProviderList is always
-	// supplied, so verification runs against the fetched list directly.
-	const isModelAvailable: ModelAvailability = async (model) => {
-		const providers = await fetchProviderList();
-		return isModelInProviders(providers, model);
-	};
-
-	const isVariantSupported: VariantSupport = async (model, variant) => {
-		const providers = await fetchProviderList();
-		return isVariantInModel(providers, model, variant);
 	};
 
 	return {
@@ -699,8 +627,6 @@ export const aliasPlugin: Plugin = async ({ client, directory }) => {
 				try {
 					result = await handleAliasCommand(
 						input.arguments,
-						isModelAvailable,
-						isVariantSupported,
 						fetchProviderList,
 					);
 				} catch (error) {
