@@ -475,8 +475,11 @@ function aliasList(): string {
 							: "";
 			// Show the effective variant (own or inherited from the nearest
 			// outer object-form entry), matching what resolution applies.
+			// readAliases guarantees object-form entries target direct model
+			// ids, so any chain containing an object-form node terminates
+			// there — a failed chain can never carry a variant.
 			const { variant } = resolveAliasDetails(key, aliases);
-			const variantTag = !chain.failure && variant ? ` [${variant}]` : "";
+			const variantTag = variant ? ` [${variant}]` : "";
 			return `  ${chain.values.join(RIGHT_ARROW)}${status}${variantTag}`;
 		})
 		.join("\n");
@@ -664,6 +667,9 @@ export const aliasPlugin: Plugin = async ({ client, directory }) => {
 		return data.all;
 	};
 
+	// The availability callbacks are required by handleAliasCommand's
+	// signature but unused in production: fetchProviderList is always
+	// supplied, so verification runs against the fetched list directly.
 	const isModelAvailable: ModelAvailability = async (model) => {
 		const providers = await fetchProviderList();
 		return isModelInProviders(providers, model);
