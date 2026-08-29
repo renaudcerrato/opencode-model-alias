@@ -1357,8 +1357,11 @@ describe("handleAliasCommand", () => {
 			"delete my key",
 			fetchProvidersOk,
 		);
-		// "my key" is split into ["my", "key"]; only "my" is considered.
-		expect(result).toContain("Alias 'my' deleted");
+		// "my key" is split into ["my", "key"]; the extra word is now
+		// rejected rather than silently ignored.
+		expect(result).toBe(
+			"Error: unexpected argument 'key'. Use 'alias delete <key> [force]'",
+		);
 	});
 
 	test("quoted arguments are not unquoted (fail closed, nothing written)", async () => {
@@ -1561,13 +1564,35 @@ describe("handleAliasCommand", () => {
 		});
 	});
 
-	test("delete - succeeds and list marks the dependent alias unresolved", async () => {
-		// source → intermediate → model; deleting the middle link leaves
-		// source dangling. Pin the current user-visible outcome.
+	test("delete - refuses to break a chain unless forced", async () => {
+		// source → intermediate → model; deleting the middle link would leave
+		// source dangling, so the delete is refused with the dependent named.
 		mockFs[ALIAS_FILE] =
 			'{"source": "intermediate", "intermediate": "openai/gpt-4o-mini"}';
 		const deleteResult = await handleAliasCommand(
 			"delete intermediate",
+			fetchProvidersOk,
+		);
+		expect(deleteResult).toBe(
+			"Error: alias 'intermediate' is referenced by other aliases: source. Delete those first, or use 'alias delete intermediate force'.",
+		);
+		// The file is untouched.
+		expect(readAliases()).toEqual({
+			source: { model: "intermediate" },
+			intermediate: { model: "openai/gpt-4o-mini" },
+		});
+		// list still shows the intact chain.
+		const listResult = await handleAliasCommand("list", fetchProvidersOk);
+		expect(listResult).toContain(
+			"source → intermediate → openai/gpt-4o-mini",
+		);
+	});
+
+	test("delete - force bypasses the dependent check and leaves the chain dangling", async () => {
+		mockFs[ALIAS_FILE] =
+			'{"source": "intermediate", "intermediate": "openai/gpt-4o-mini"}';
+		const deleteResult = await handleAliasCommand(
+			"delete intermediate force",
 			fetchProvidersOk,
 		);
 		expect(deleteResult).toContain("Alias 'intermediate' deleted");
@@ -1575,10 +1600,10 @@ describe("handleAliasCommand", () => {
 		expect(listResult).toContain("source → intermediate [unresolved]");
 	});
 
-	test("delete - config hook rewrites a dependent agent model to the dangling name", async () => {
+	test("delete - config hook rewrites a dependent agent model to the dangling name after force", async () => {
 		mockFs[ALIAS_FILE] =
 			'{"source": "intermediate", "intermediate": "openai/gpt-4o-mini"}';
-		await handleAliasCommand("delete intermediate", fetchProvidersOk);
+		await handleAliasCommand("delete intermediate force", fetchProvidersOk);
 		const config: any = {
 			agent: { scout: { model: "source" } },
 		};
@@ -1587,6 +1612,61 @@ describe("handleAliasCommand", () => {
 		// not a provider/model identifier — resolution rewrites the model to
 		// that literal. Pin this documented fail-open-at-terminal behavior.
 		expect(config.agent.scout.model).toBe("intermediate");
+	});
+
+	test("delete - names all transitive dependents in the refusal", async () => {
+		// head → mid → tail → model: deleting tail is refused naming both
+		// transitive dependents, sorted.
+		mockFs[ALIAS_FILE] =
+			'{"head": "mid", "mid": "tail", "tail": "openai/gpt-4o-mini"}';
+		const result = await handleAliasCommand("delete tail", fetchProvidersOk);
+		expect(result).toBe(
+			"Error: alias 'tail' is referenced by other aliases: head, mid. Delete those first, or use 'alias delete tail force'.",
+		);
+	});
+
+	test("delete - deleting a chain head is allowed (nothing depends on it)", async () => {
+		mockFs[ALIAS_FILE] =
+			'{"source": "intermediate", "intermediate": "openai/gpt-4o-mini"}';
+		const result = await handleAliasCommand("delete source", fetchProvidersOk);
+		expect(result).toContain("Alias 'source' deleted");
+		expect(readAliases()).toEqual({
+			intermediate: { model: "openai/gpt-4o-mini" },
+		});
+	});
+
+	test("delete - leaf alias with no dependents deletes without force", async () => {
+		mockFs[ALIAS_FILE] =
+			'{"cheap": "openai/gpt-4o-mini", "other": "openai/gpt-4o"}';
+		const result = await handleAliasCommand("delete cheap", fetchProvidersOk);
+		expect(result).toContain("Alias 'cheap' deleted");
+		expect(readAliases()).toEqual({
+			other: { model: "openai/gpt-4o" },
+		});
+	});
+
+	test("delete - unexpected second argument is rejected", async () => {
+		mockFs[ALIAS_FILE] = '{"cheap": "openai/gpt-4o-mini"}';
+		const result = await handleAliasCommand(
+			"delete cheap oops",
+			fetchProvidersOk,
+		);
+		expect(result).toBe(
+			"Error: unexpected argument 'oops'. Use 'alias delete <key> [force]'",
+		);
+		expect(readAliases()).toEqual({
+			cheap: { model: "openai/gpt-4o-mini" },
+		});
+	});
+
+	test("delete - too many arguments is rejected", async () => {
+		const result = await handleAliasCommand(
+			"delete cheap force extra",
+			fetchProvidersOk,
+		);
+		expect(result).toBe(
+			"Error: too many arguments. Use 'alias delete <key> [force]'",
+		);
 	});
 });
 

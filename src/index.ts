@@ -415,7 +415,7 @@ function aliasHelp(): string {
 Subcommands:
   list                                   List all model aliases
   set <key> <provider/model> [variant]   Set a model alias, optionally with a variant
-  delete <key>                           Delete a model alias
+  delete <key> [force]                   Delete a model alias (force bypasses the dependent-alias check)
   help                                   Show this help message
 
 Examples:
@@ -423,6 +423,7 @@ Examples:
   alias set cheap openai/gpt-4o-mini
   alias set smart ollama-cloud/glm-5.3-flash max
   alias delete cheap
+  alias delete cheap force
 
 Notes:
   - The variant argument requires a direct provider/model target; it cannot
@@ -573,6 +574,13 @@ function aliasDelete(parts: string[]): string {
 	if (!key) {
 		return "Error: key is required for 'delete' subcommand";
 	}
+	if (parts.length > 3) {
+		return "Error: too many arguments. Use 'alias delete <key> [force]'";
+	}
+	if (parts.length === 3 && parts[2] !== "force") {
+		return `Error: unexpected argument '${parts[2]}'. Use 'alias delete <key> [force]'`;
+	}
+	const force = parts[2] === "force";
 	let aliases: AliasMap;
 	try {
 		aliases = readAliases();
@@ -581,6 +589,21 @@ function aliasDelete(parts: string[]): string {
 	}
 	if (!hasAlias(aliases, key)) {
 		return `Error: alias '${key}' does not exist`;
+	}
+	if (!force) {
+		// Refuse to break chains: any other alias whose resolution passes
+		// through this key would dangle after the delete. Includes
+		// transitive dependents (the chain walk sees the whole path).
+		const dependents = Object.keys(aliases)
+			.filter(
+				(other) =>
+					other !== key &&
+					getAliasChain(other, aliases).values.includes(key),
+			)
+			.sort();
+		if (dependents.length > 0) {
+			return `Error: alias '${key}' is referenced by other aliases: ${dependents.join(", ")}. Delete those first, or use 'alias delete ${key} force'.`;
+		}
 	}
 	// Same concurrent-modification guard as 'set': re-read and compare so a
 	// concurrent writer between our snapshot and the write is not clobbered.

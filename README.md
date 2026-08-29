@@ -93,6 +93,9 @@ Manage model aliases directly from OpenCode:
 # Delete an alias
 /alias delete cheap
 
+# Delete an alias that other aliases chain through (requires force)
+/alias delete intermediate force
+
 # Show help
 /alias help
 
@@ -166,6 +169,7 @@ Rules:
 - String alias chains inherit the variant of the nearest outer object-form entry in their resolution chain.
 - An alias-provided variant **overrides** any variant configured on the agent or command.
 - Chains support up to 16 hops; cycles are rejected.
+- Deleting an alias that other aliases chain through is refused: the delete names the dependent aliases — delete those first, or bypass the check with `alias delete <key> force`.
 - Alias keys **shadow model references**: an agent/command `model` matching an alias key is always resolved through it, even if it looks like a `provider/model` identifier. Avoid naming aliases after real model ids.
 
 ### The `set` Command with Variants
@@ -186,6 +190,22 @@ An unsupported variant is rejected with the list of supported ones:
 
 ```
 Error: variant 'turbo' is not listed for model 'ollama-cloud/glm-5.3-flash'. Supported variants: low, max.
+```
+
+### Deleting Aliases Safely
+
+Deleting an alias that other aliases chain through is refused, so a chain is never silently broken:
+
+```
+/alias delete intermediate
+# Error: alias 'intermediate' is referenced by other aliases: source. Delete those first, or use 'alias delete intermediate force'.
+```
+
+Delete the dependents first, or bypass the check with `force` (which leaves any dependent alias `[unresolved]`):
+
+```
+/alias delete intermediate force
+# Alias 'intermediate' deleted. Please restart OpenCode for the change to take effect.
 ```
 
 ### Alias File Location
@@ -223,9 +243,11 @@ Example `model-aliases.json`:
 The plugin never guesses:
 
 - An unreadable or invalid alias file produces an explicit `Error: ...` for `/alias` commands; nothing is written.
-- Malformed alias definitions (missing `model`, non-string `variant`, unknown fields, object-form entries pointing at other aliases or at malformed model ids) are rejected.
+- A leading UTF-8 BOM is tolerated (Windows editors and PowerShell emit one), and a zero-byte or whitespace-only file is treated as "no aliases yet".
+- Malformed alias definitions (missing `model`, non-string or whitespace-only `variant`, unknown fields, object-form entries pointing at other aliases or at malformed model ids) are rejected.
 - `/alias set` verifies targets against the provider list and validates variants against provider metadata before writing. An empty provider list (nothing authenticated) also fails closed.
 - Writes are atomic (temp file + rename, owner-only permissions) with a concurrent-modification check on both `set` and `delete`.
+- Deleting an alias referenced by other aliases is refused unless `force` is given, so chains are never silently broken.
 - At startup, an unreadable alias file is tolerated (aliases are simply not applied) so a broken file never prevents OpenCode from launching.
 
 ## Development
