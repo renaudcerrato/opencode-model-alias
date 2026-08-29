@@ -1,5 +1,6 @@
 module.exports = {
   testEnvironment: "node",
+  setupFiles: ["<rootDir>/tests/setup.cjs"],
   transform: {
     "^.+\\.tsx?$": [
       "ts-jest",
