@@ -2097,6 +2097,32 @@ describe("plugin wiring", () => {
 		expect(output.parts[0].text).toBe("keep me");
 	});
 
+	test("command.execute.before replaces all parts, including non-text ones", async () => {
+		const plugin = await aliasPlugin({
+			client: makeClient({}),
+			directory: "/tmp/proj",
+		} as any);
+		const output: any = {
+			parts: [
+				{ type: "text", text: "original" },
+				{ type: "file", filename: "attachment.png" },
+				{ type: "image", mime: "image/png" },
+			],
+		};
+		await plugin["command.execute.before"]!(
+			{ command: "alias", arguments: "list" } as any,
+			output,
+		);
+		// /alias is a pure text command: every part — regardless of type — is
+		// replaced by the single text result.
+		expect(output.parts).toHaveLength(1);
+		expect(output.parts[0].type).toBe("text");
+		expect(output.parts[0].text).toBe(
+			"No aliases defined. Use 'alias set <key> <provider/model> [variant]' to add one.",
+		);
+		expect(output.parts[0].ignored).toBe(true);
+	});
+
 	test("provider list error surfaces in set verification", async () => {
 		const plugin = await aliasPlugin({
 			client: makeClient({ providerError: { code: 500 } }),
