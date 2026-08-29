@@ -66,6 +66,7 @@ import pluginModule, {
 	writeAliases,
 	resolveAlias,
 	resolveConfigAliases,
+	resolveConfigDir,
 	handleAliasCommand,
 	aliasPlugin,
 	server,
@@ -100,6 +101,21 @@ describe("resolveAlias", () => {
 
 	test("returns model on cycle", () => {
 		expect(resolveAlias("a", { a: "b", b: "a" })).toBe("a");
+	});
+
+	test("resolves a chain of exactly 16 hops", () => {
+		const aliases: Record<string, string> = {};
+		for (let i = 1; i < 16; i++) aliases[`a${i}`] = `a${i + 1}`;
+		aliases.a16 = "openai/gpt-4o-mini";
+		expect(resolveAlias("a1", aliases)).toBe("openai/gpt-4o-mini");
+	});
+
+	test("fails closed on chains deeper than 16 hops", () => {
+		const aliases: Record<string, string> = {};
+		for (let i = 1; i <= 17; i++) {
+			aliases[`a${i}`] = i === 17 ? "openai/gpt-4o-mini" : `a${i + 1}`;
+		}
+		expect(resolveAlias("a1", aliases)).toBe("a1");
 	});
 });
 
@@ -162,6 +178,28 @@ describe("readAliases", () => {
 			a: { model: "b" },
 			b: { model: "openai/gpt-4o-mini" },
 		});
+	});
+
+	test("throws on unreadable file (non-ENOENT, fail closed)", () => {
+		const originalRead = fs.readFileSync;
+		(fs as any).readFileSync = jest.fn(() => {
+			const error: NodeJS.ErrnoException = new Error("EACCES: permission denied");
+			error.code = "EACCES";
+			throw error;
+		});
+		expect(() => readAliases()).toThrow(/alias file unreadable/);
+		(fs as any).readFileSync = originalRead;
+	});
+
+	test("parses __proto__ key from hand-edited file as own property", () => {
+		mockFs[ALIAS_FILE] = '{"__proto__": "openai/gpt-4o-mini"}';
+		const aliases = readAliases();
+		expect(Object.keys(aliases)).toContain("__proto__");
+		expect((aliases as any)["__proto__"]).toEqual({
+			model: "openai/gpt-4o-mini",
+		});
+		// Prototype pollution guard: the parse must not taint Object.prototype.
+		expect(({} as any).polluted).toBeUndefined();
 	});
 });
 
@@ -252,6 +290,34 @@ describe("handleAliasCommand", () => {
 		expect(mockFs[ALIAS_FILE]).toBe(before);
 	});
 
+	test("list - shows [cycle] status", async () => {
+		mockFs[ALIAS_FILE] = '{"a": "b", "b": "a"}';
+		const result = await handleAliasCommand("list", ok, variantOk);
+		expect(result).toContain("a → b → a [cycle]");
+	});
+
+	test("list - shows [exceeds 16 hops] status", async () => {
+		const entries: Record<string, string> = {};
+		for (let i = 1; i <= 18; i++) {
+			entries[`a${i}`] = i === 18 ? "openai/gpt-4o-mini" : `a${i + 1}`;
+		}
+		mockFs[ALIAS_FILE] = JSON.stringify(entries);
+		const result = await handleAliasCommand("list", ok, variantOk);
+		expect(result).toContain("[exceeds 16 hops]");
+	});
+
+	test("list - shows [unresolved] for non model-id terminal", async () => {
+		mockFs[ALIAS_FILE] = '{"a": "not-a-model-id"}';
+		const result = await handleAliasCommand("list", ok, variantOk);
+		expect(result).toContain("a → not-a-model-id [unresolved]");
+	});
+
+	test("list - shows multi-hop chain", async () => {
+		mockFs[ALIAS_FILE] = '{"a": "b", "b": "c", "c": "openai/gpt-4o-mini"}';
+		const result = await handleAliasCommand("list", ok, variantOk);
+		expect(result).toContain("a → b → c → openai/gpt-4o-mini");
+	});
+
 	test("set - success", async () => {
 		const result = await handleAliasCommand(
 			"set cheap openai/gpt-4o-mini",
@@ -330,6 +396,93 @@ describe("handleAliasCommand", () => {
 		expect(result).toMatch(/creates a cycle/);
 	});
 
+	test("set - rejects chains exceeding 16 hops", async () => {
+		const entries: Record<string, string> = {};
+		for (let i = 1; i <= 17; i++) {
+			entries[`a${i}`] = i === 17 ? "openai/gpt-4o-mini" : `a${i + 1}`;
+		}
+		mockFs[ALIAS_FILE] = JSON.stringify(entries);
+		const result = await handleAliasCommand("set start a1", ok, variantOk);
+		expect(result).toMatch(/exceeds the 16-hop resolution limit/);
+	});
+
+	test("set - rejects invalid provider/model identifier", async () => {
+		const result = await handleAliasCommand(
+			"set cheap gpt-4o-mini",
+			ok,
+			variantOk,
+		);
+		expect(result).toBe(
+			"Error: 'gpt-4o-mini' is not a valid provider/model identifier",
+		);
+	});
+
+	test("set - alias target without variant succeeds", async () => {
+		mockFs[ALIAS_FILE] = '{"smart": "ollama-cloud/glm-5.3-flash"}';
+		const result = await handleAliasCommand(
+			"set reviewer smart",
+			ok,
+			variantOk,
+		);
+		expect(result).toContain("Alias 'reviewer' set to 'smart'");
+		expect(readAliases()).toEqual({
+			smart: { model: "ollama-cloud/glm-5.3-flash" },
+			reviewer: { model: "smart" },
+		});
+	});
+
+	test("set - model id with slash in model part", async () => {
+		const result = await handleAliasCommand(
+			"set deep openai/org/gpt-4o-mini",
+			ok,
+			variantOk,
+			async () => [
+				{
+					id: "openai",
+					models: [{ id: "org/gpt-4o-mini", variants: { max: {} } }],
+				},
+			],
+		);
+		expect(result).toContain("Alias 'deep' set");
+	});
+
+	test("set - no-variants hint when model lists none", async () => {
+		const result = await handleAliasCommand(
+			"set smart ollama-cloud/glm-5.3-flash max",
+			ok,
+			variantOk,
+			async () => [
+				{
+					id: "ollama-cloud",
+					models: [{ id: "glm-5.3-flash" }],
+				},
+			],
+		);
+		expect(result).toContain("The model lists no variants.");
+	});
+
+	test("set - concurrent modification detected", async () => {
+		mockFs[ALIAS_FILE] = '{"cheap": "openai/gpt-4o-mini"}';
+		const originalRead = fs.readFileSync;
+		let reads = 0;
+		(fs as any).readFileSync = jest.fn((path: string) => {
+			if (path === ALIAS_FILE) {
+				reads++;
+				if (reads === 2) return '{"cheap": "openai/gpt-4o", "new": "x"}';
+				return mockFs[path];
+			}
+			return originalRead(path);
+		});
+		const result = await handleAliasCommand(
+			"set expensive openai/gpt-4o",
+			ok,
+			variantOk,
+		);
+		(fs as any).readFileSync = originalRead;
+		expect(result).toMatch(/changed concurrently/);
+		expect(mockFs[ALIAS_FILE]).toBe('{"cheap": "openai/gpt-4o-mini"}');
+	});
+
 	test("set - missing key", async () => {
 		const result = await handleAliasCommand("set", ok, variantOk);
 		expect(result).toBe("Error: key is required for 'set' subcommand");
@@ -400,6 +553,22 @@ describe("handleAliasCommand", () => {
 		);
 		expect(result).toMatch(/^Error:/);
 		expect(mockFs[ALIAS_FILE]).toBe(before);
+	});
+
+	test("set - fail closed on non-ENOENT read error", async () => {
+		const originalRead = fs.readFileSync;
+		(fs as any).readFileSync = jest.fn(() => {
+			const error: NodeJS.ErrnoException = new Error("EACCES: permission denied");
+			error.code = "EACCES";
+			throw error;
+		});
+		const result = await handleAliasCommand(
+			"set a openai/gpt-4o-mini",
+			ok,
+			variantOk,
+		);
+		(fs as any).readFileSync = originalRead;
+		expect(result).toMatch(/alias file unreadable/);
 	});
 
 	test("set - __proto__ key persisted as own property", async () => {
@@ -539,6 +708,155 @@ describe("resolveConfigAliases", () => {
 		};
 		expect(() => resolveConfigAliases(config)).not.toThrow();
 		expect(config.agent.myagent.model).toBe("cheap");
+	});
+
+	test("leaves model unchanged when chain exceeds depth cap", () => {
+		const entries: Record<string, string> = {};
+		for (let i = 1; i <= 17; i++) {
+			entries[`a${i}`] = i === 17 ? "openai/gpt-4o-mini" : `a${i + 1}`;
+		}
+		mockFs[ALIAS_FILE] = JSON.stringify(entries);
+		const config: any = {
+			agent: {
+				myagent: { model: "a1" },
+			},
+		};
+		resolveConfigAliases(config);
+		expect(config.agent.myagent.model).toBe("a1");
+		expect(config.agent.myagent.variant).toBeUndefined();
+	});
+});
+
+describe("config dir resolution", () => {
+	const originalEnv = { ...process.env };
+
+	afterEach(() => {
+		process.env = { ...originalEnv };
+	});
+
+	test("OPENCODE_CONFIG_DIR takes precedence over XDG_CONFIG_HOME", () => {
+		process.env.OPENCODE_CONFIG_DIR = "/custom/dir";
+		process.env.XDG_CONFIG_HOME = "/xdg/home";
+		expect(resolveConfigDir()).toBe("/custom/dir");
+	});
+
+	test("XDG_CONFIG_HOME used when OPENCODE_CONFIG_DIR unset", () => {
+		delete process.env.OPENCODE_CONFIG_DIR;
+		process.env.XDG_CONFIG_HOME = "/xdg/home";
+		expect(resolveConfigDir()).toBe("/xdg/home/opencode");
+	});
+
+	test("falls back to homedir/.config when both unset", () => {
+		delete process.env.OPENCODE_CONFIG_DIR;
+		delete process.env.XDG_CONFIG_HOME;
+		expect(resolveConfigDir()).toBe("/home/test/.config/opencode");
+	});
+
+	test("empty XDG_CONFIG_HOME falls back to homedir", () => {
+		delete process.env.OPENCODE_CONFIG_DIR;
+		process.env.XDG_CONFIG_HOME = "   ";
+		expect(resolveConfigDir()).toBe("/home/test/.config/opencode");
+	});
+});
+
+describe("plugin wiring", () => {
+	beforeEach(() => {
+		Object.keys(mockFs).forEach((key) => delete mockFs[key]);
+	});
+
+	function makeClient(overrides: {
+		providerList?: unknown;
+		providerError?: unknown;
+	}) {
+		return {
+			provider: {
+				list: jest.fn(async () => {
+					if (overrides.providerError) {
+						return { error: overrides.providerError, data: undefined };
+					}
+					return { error: undefined, data: { all: overrides.providerList ?? [] } };
+				}),
+			},
+		} as any;
+	}
+
+	test("config hook registers /alias command and resolves aliases", async () => {
+		mockFs[ALIAS_FILE] = '{"cheap": "openai/gpt-4o-mini"}';
+		const plugin = await aliasPlugin({
+			client: makeClient({}),
+			directory: "/tmp/proj",
+		} as any);
+		const config: any = {
+			agent: { myagent: { model: "cheap" } },
+		};
+		await plugin.config(config);
+		expect(config.command.alias).toBeDefined();
+		expect(config.command.alias.description).toContain("Manage model aliases");
+		expect(config.agent.myagent.model).toBe("openai/gpt-4o-mini");
+	});
+
+	test("command.execute.before intercepts alias command", async () => {
+		const plugin = await aliasPlugin({
+			client: makeClient({}),
+			directory: "/tmp/proj",
+		} as any);
+		const output: any = {
+			parts: [{ type: "text", text: "original" }],
+		};
+		await plugin["command.execute.before"]!(
+			{ command: "alias", arguments: "list" } as any,
+			output,
+		);
+		expect(output.parts).toHaveLength(1);
+		expect(output.parts[0].text).toBe(
+			"No aliases defined. Use 'alias set <key> <provider/model> [variant]' to add one.",
+		);
+		expect(output.parts[0].ignored).toBe(true);
+	});
+
+	test("command.execute.before ignores other commands", async () => {
+		const plugin = await aliasPlugin({
+			client: makeClient({}),
+			directory: "/tmp/proj",
+		} as any);
+		const output: any = {
+			parts: [{ type: "text", text: "keep me" }],
+		};
+		await plugin["command.execute.before"]!(
+			{ command: "other", arguments: "" } as any,
+			output,
+		);
+		expect(output.parts[0].text).toBe("keep me");
+	});
+
+	test("provider list error surfaces in set verification", async () => {
+		const plugin = await aliasPlugin({
+			client: makeClient({ providerError: { code: 500 } }),
+			directory: "/tmp/proj",
+		} as any);
+		const output: any = { parts: [] };
+		await plugin["command.execute.before"]!(
+			{ command: "alias", arguments: "set cheap openai/gpt-4o-mini" } as any,
+			output,
+		);
+		expect(output.parts[0].text).toMatch(/^Error: could not verify model/);
+	});
+
+	test("provider list unexpected shape surfaces in set verification", async () => {
+		const plugin = await aliasPlugin({
+			client: {
+				provider: {
+					list: jest.fn(async () => ({ error: undefined, data: null })),
+				},
+			} as any,
+			directory: "/tmp/proj",
+		} as any);
+		const output: any = { parts: [] };
+		await plugin["command.execute.before"]!(
+			{ command: "alias", arguments: "set cheap openai/gpt-4o-mini" } as any,
+			output,
+		);
+		expect(output.parts[0].text).toMatch(/^Error: could not verify model/);
 	});
 });
 

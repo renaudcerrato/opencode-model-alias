@@ -363,6 +363,7 @@ export {
 	readAliases,
 	resolveAlias,
 	resolveConfigAliases,
+	resolveConfigDir,
 	writeAliases,
 };
 
