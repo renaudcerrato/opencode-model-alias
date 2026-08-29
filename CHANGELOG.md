@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.1.0] - 2026-08-29
+
+### Added
+- Object alias form `{ "model": "provider/model", "variant": "..." }` alongside legacy string aliases.
+- Model variants: validated against provider metadata at set time (fail-closed, with supported-variants hint); alias-provided variants override agent/command-configured variants.
+- Recursive alias chains (up to 16 hops) with cycle detection; string aliases inherit the variant of the nearest outer object-form entry.
+- Fail-closed reads: invalid/unreadable alias files produce explicit errors for `/alias` commands; startup stays tolerant.
+- Atomic writes (temp file + rename, mode 0600) with concurrent-modification checks on both `set` and `delete`.
+- Config directory resolution mirroring OpenCode: `OPENCODE_CONFIG_DIR`, then `$XDG_CONFIG_HOME/opencode`, then `~/.config/opencode`.
+- `/alias set <key> <provider/model> [variant]` with single provider-list fetch per set.
+- Test suite: 83 tests with fs mocks; CI test workflow with coverage summary.
+
+### Changed
+- `/alias list` now shows the effective (own or inherited) variant per alias.
+- Object-form `model` values are validated as `provider/model` identifiers at read time.
+- CI: actions pinned by SHA, least-privilege `permissions`, coverage summary from a single test run.
+
 ## [1.0.5] - 2026-04-08
 
 ### Changed

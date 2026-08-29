@@ -162,6 +162,7 @@ Rules:
 - String alias chains inherit the variant of the nearest outer object-form entry in their resolution chain.
 - An alias-provided variant **overrides** any variant configured on the agent or command.
 - Chains support up to 16 hops; cycles are rejected.
+- Alias keys **shadow model references**: an agent/command `model` matching an alias key is always resolved through it, even if it looks like a `provider/model` identifier. Avoid naming aliases after real model ids.
 
 ### The `set` Command with Variants
 
@@ -218,9 +219,9 @@ Example `model-aliases.json`:
 The plugin never guesses:
 
 - An unreadable or invalid alias file produces an explicit `Error: ...` for `/alias` commands; nothing is written.
-- Malformed alias definitions (missing `model`, non-string `variant`, unknown fields, object-form entries pointing at other aliases) are rejected.
-- `/alias set` verifies targets against the provider list and validates variants against provider metadata before writing.
-- Writes are atomic (temp file + rename) with a concurrent-modification check.
+- Malformed alias definitions (missing `model`, non-string `variant`, unknown fields, object-form entries pointing at other aliases or at malformed model ids) are rejected.
+- `/alias set` verifies targets against the provider list and validates variants against provider metadata before writing. An empty provider list (nothing authenticated) also fails closed.
+- Writes are atomic (temp file + rename, owner-only permissions) with a concurrent-modification check on both `set` and `delete`.
 - At startup, an unreadable alias file is tolerated (aliases are simply not applied) so a broken file never prevents OpenCode from launching.
 
 ## Development

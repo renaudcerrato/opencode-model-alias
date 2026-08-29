@@ -178,6 +178,11 @@ describe("readAliases", () => {
 		expect(() => readAliases()).toThrow(/not another alias/);
 	});
 
+	test("rejects object alias with malformed model identifier", () => {
+		mockFs[ALIAS_FILE] = '{"bad": {"model": "garbage"}}';
+		expect(() => readAliases()).toThrow(/direct provider\/model identifier/);
+	});
+
 	test("allows string alias chains", () => {
 		mockFs[ALIAS_FILE] =
 			'{"source": "intermediate", "intermediate": "openai/gpt-4o-mini"}';
@@ -286,6 +291,15 @@ describe("handleAliasCommand", () => {
 		const result = await handleAliasCommand("list", ok, variantOk);
 		expect(result).toBe(
 			"Model aliases:\n  smart → ollama-cloud/glm-5.3-flash [max]",
+		);
+	});
+
+	test("list - shows inherited variant on string alias chain", async () => {
+		mockFs[ALIAS_FILE] =
+			'{"reviewer": "smart", "smart": {"model": "ollama-cloud/glm-5.3-flash", "variant": "max"}}';
+		const result = await handleAliasCommand("list", ok, variantOk);
+		expect(result).toContain(
+			"reviewer → smart → ollama-cloud/glm-5.3-flash [max]",
 		);
 	});
 
@@ -493,6 +507,56 @@ describe("handleAliasCommand", () => {
 		(fs as any).readFileSync = originalRead;
 		expect(result).toMatch(/changed concurrently/);
 		expect(mockFs[ALIAS_FILE]).toBe('{"cheap": "openai/gpt-4o-mini"}');
+	});
+
+	test("delete - concurrent modification detected", async () => {
+		mockFs[ALIAS_FILE] = '{"cheap": "openai/gpt-4o-mini"}';
+		const originalRead = fs.readFileSync;
+		let reads = 0;
+		(fs as any).readFileSync = jest.fn((path: string) => {
+			if (path === ALIAS_FILE) {
+				reads++;
+				if (reads === 2) {
+					return '{"cheap": "openai/gpt-4o-mini", "other": "openai/gpt-4o"}';
+				}
+				return mockFs[path];
+			}
+			return originalRead(path);
+		});
+		const result = await handleAliasCommand("delete cheap", ok, variantOk);
+		(fs as any).readFileSync = originalRead;
+		expect(result).toMatch(/changed concurrently/);
+		expect(mockFs[ALIAS_FILE]).toBe('{"cheap": "openai/gpt-4o-mini"}');
+	});
+
+	test("set - fetchProviders positive path writes object form", async () => {
+		const result = await handleAliasCommand(
+			"set smart ollama-cloud/glm-5.3-flash max",
+			ok,
+			variantOk,
+			async () => [
+				{
+					id: "ollama-cloud",
+					models: [{ id: "glm-5.3-flash", variants: { max: {}, low: {} } }],
+				},
+			],
+		);
+		expect(result).toContain("Alias 'smart' set");
+		expect(readAliases()).toEqual({
+			smart: { model: "ollama-cloud/glm-5.3-flash", variant: "max" },
+		});
+	});
+
+	test("set - empty provider list fails closed", async () => {
+		const result = await handleAliasCommand(
+			"set cheap openai/gpt-4o-mini",
+			ok,
+			variantOk,
+			async () => [],
+		);
+		expect(result).toBe(
+			"Error: model 'openai/gpt-4o-mini' is not available from a known provider",
+		);
 	});
 
 	test("set - missing key", async () => {

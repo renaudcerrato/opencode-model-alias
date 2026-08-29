@@ -1,6 +1,6 @@
 {
   "name": "opencode-model-alias",
-  "version": "1.0.5",
+  "version": "1.1.0",
   "private": true,
   "description": "OpenCode plugin that allows users to define model aliases for consistent use across machines.",
   "main": "src/index.ts",
@@ -13,7 +13,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/mattaschmann/opencode-model-alias.git"
+    "url": "git+https://github.com/renaudcerrato/opencode-model-alias.git"
   },
   "keywords": [
     "opencode",
