@@ -95,27 +95,33 @@ describe("resolveAlias", () => {
 
 	test("resolves chained aliases", () => {
 		expect(
-			resolveAlias("a", { a: "b", b: "c", c: "openai/gpt-4o-mini" }),
+			resolveAlias("source", {
+				source: "intermediate",
+				intermediate: "target",
+				target: "openai/gpt-4o-mini",
+			}),
 		).toBe("openai/gpt-4o-mini");
 	});
 
 	test("returns model on cycle", () => {
-		expect(resolveAlias("a", { a: "b", b: "a" })).toBe("a");
+		expect(resolveAlias("first", { first: "second", second: "first" })).toBe(
+			"first",
+		);
 	});
 
 	test("resolves a chain of exactly 16 hops", () => {
 		const aliases: Record<string, string> = {};
-		for (let i = 1; i < 16; i++) aliases[`a${i}`] = `a${i + 1}`;
-		aliases.a16 = "openai/gpt-4o-mini";
-		expect(resolveAlias("a1", aliases)).toBe("openai/gpt-4o-mini");
+		for (let i = 1; i < 16; i++) aliases[`hop${i}`] = `hop${i + 1}`;
+		aliases.hop16 = "openai/gpt-4o-mini";
+		expect(resolveAlias("hop1", aliases)).toBe("openai/gpt-4o-mini");
 	});
 
 	test("fails closed on chains deeper than 16 hops", () => {
 		const aliases: Record<string, string> = {};
 		for (let i = 1; i <= 17; i++) {
-			aliases[`a${i}`] = i === 17 ? "openai/gpt-4o-mini" : `a${i + 1}`;
+			aliases[`hop${i}`] = i === 17 ? "openai/gpt-4o-mini" : `hop${i + 1}`;
 		}
-		expect(resolveAlias("a1", aliases)).toBe("a1");
+		expect(resolveAlias("hop1", aliases)).toBe("hop1");
 	});
 });
 
@@ -168,15 +174,16 @@ describe("readAliases", () => {
 
 	test("rejects object alias pointing at another alias", () => {
 		mockFs[ALIAS_FILE] =
-			'{"a": {"model": "b"}, "b": "openai/gpt-4o-mini"}';
+			'{"outer": {"model": "inner"}, "inner": "openai/gpt-4o-mini"}';
 		expect(() => readAliases()).toThrow(/not another alias/);
 	});
 
 	test("allows string alias chains", () => {
-		mockFs[ALIAS_FILE] = '{"a": "b", "b": "openai/gpt-4o-mini"}';
+		mockFs[ALIAS_FILE] =
+			'{"source": "intermediate", "intermediate": "openai/gpt-4o-mini"}';
 		expect(readAliases()).toEqual({
-			a: { model: "b" },
-			b: { model: "openai/gpt-4o-mini" },
+			source: { model: "intermediate" },
+			intermediate: { model: "openai/gpt-4o-mini" },
 		});
 	});
 
@@ -291,15 +298,15 @@ describe("handleAliasCommand", () => {
 	});
 
 	test("list - shows [cycle] status", async () => {
-		mockFs[ALIAS_FILE] = '{"a": "b", "b": "a"}';
+		mockFs[ALIAS_FILE] = '{"first": "second", "second": "first"}';
 		const result = await handleAliasCommand("list", ok, variantOk);
-		expect(result).toContain("a → b → a [cycle]");
+		expect(result).toContain("first → second → first [cycle]");
 	});
 
 	test("list - shows [exceeds 16 hops] status", async () => {
 		const entries: Record<string, string> = {};
 		for (let i = 1; i <= 18; i++) {
-			entries[`a${i}`] = i === 18 ? "openai/gpt-4o-mini" : `a${i + 1}`;
+			entries[`hop${i}`] = i === 18 ? "openai/gpt-4o-mini" : `hop${i + 1}`;
 		}
 		mockFs[ALIAS_FILE] = JSON.stringify(entries);
 		const result = await handleAliasCommand("list", ok, variantOk);
@@ -307,15 +314,18 @@ describe("handleAliasCommand", () => {
 	});
 
 	test("list - shows [unresolved] for non model-id terminal", async () => {
-		mockFs[ALIAS_FILE] = '{"a": "not-a-model-id"}';
+		mockFs[ALIAS_FILE] = '{"broken": "not-a-model-id"}';
 		const result = await handleAliasCommand("list", ok, variantOk);
-		expect(result).toContain("a → not-a-model-id [unresolved]");
+		expect(result).toContain("broken → not-a-model-id [unresolved]");
 	});
 
 	test("list - shows multi-hop chain", async () => {
-		mockFs[ALIAS_FILE] = '{"a": "b", "b": "c", "c": "openai/gpt-4o-mini"}';
+		mockFs[ALIAS_FILE] =
+			'{"source": "intermediate", "intermediate": "target", "target": "openai/gpt-4o-mini"}';
 		const result = await handleAliasCommand("list", ok, variantOk);
-		expect(result).toContain("a → b → c → openai/gpt-4o-mini");
+		expect(result).toContain(
+			"source → intermediate → target → openai/gpt-4o-mini",
+		);
 	});
 
 	test("set - success", async () => {
@@ -387,9 +397,9 @@ describe("handleAliasCommand", () => {
 	});
 
 	test("set - rejects cycle", async () => {
-		mockFs[ALIAS_FILE] = '{"a": "b", "b": "a"}';
+		mockFs[ALIAS_FILE] = '{"first": "second", "second": "first"}';
 		const result = await handleAliasCommand(
-			"set c a",
+			"set third first",
 			ok,
 			variantOk,
 		);
@@ -399,10 +409,10 @@ describe("handleAliasCommand", () => {
 	test("set - rejects chains exceeding 16 hops", async () => {
 		const entries: Record<string, string> = {};
 		for (let i = 1; i <= 17; i++) {
-			entries[`a${i}`] = i === 17 ? "openai/gpt-4o-mini" : `a${i + 1}`;
+			entries[`hop${i}`] = i === 17 ? "openai/gpt-4o-mini" : `hop${i + 1}`;
 		}
 		mockFs[ALIAS_FILE] = JSON.stringify(entries);
-		const result = await handleAliasCommand("set start a1", ok, variantOk);
+		const result = await handleAliasCommand("set entry hop1", ok, variantOk);
 		expect(result).toMatch(/exceeds the 16-hop resolution limit/);
 	});
 
@@ -468,7 +478,9 @@ describe("handleAliasCommand", () => {
 		(fs as any).readFileSync = jest.fn((path: string) => {
 			if (path === ALIAS_FILE) {
 				reads++;
-				if (reads === 2) return '{"cheap": "openai/gpt-4o", "new": "x"}';
+				if (reads === 2) {
+					return '{"cheap": "openai/gpt-4o", "other": "openai/gpt-4o"}';
+				}
 				return mockFs[path];
 			}
 			return originalRead(path);
@@ -494,7 +506,11 @@ describe("handleAliasCommand", () => {
 	});
 
 	test("set - too many arguments", async () => {
-		const result = await handleAliasCommand("set a b c d", ok, variantOk);
+		const result = await handleAliasCommand(
+			"set key model variant extra",
+			ok,
+			variantOk,
+		);
 		expect(result).toMatch(/too many arguments/);
 	});
 
@@ -547,7 +563,7 @@ describe("handleAliasCommand", () => {
 		mockFs[ALIAS_FILE] = "broken{";
 		const before = mockFs[ALIAS_FILE];
 		const result = await handleAliasCommand(
-			"set a openai/gpt-4o-mini",
+			"set cheap openai/gpt-4o-mini",
 			ok,
 			variantOk,
 		);
@@ -563,7 +579,7 @@ describe("handleAliasCommand", () => {
 			throw error;
 		});
 		const result = await handleAliasCommand(
-			"set a openai/gpt-4o-mini",
+			"set cheap openai/gpt-4o-mini",
 			ok,
 			variantOk,
 		);
@@ -713,16 +729,16 @@ describe("resolveConfigAliases", () => {
 	test("leaves model unchanged when chain exceeds depth cap", () => {
 		const entries: Record<string, string> = {};
 		for (let i = 1; i <= 17; i++) {
-			entries[`a${i}`] = i === 17 ? "openai/gpt-4o-mini" : `a${i + 1}`;
+			entries[`hop${i}`] = i === 17 ? "openai/gpt-4o-mini" : `hop${i + 1}`;
 		}
 		mockFs[ALIAS_FILE] = JSON.stringify(entries);
 		const config: any = {
 			agent: {
-				myagent: { model: "a1" },
+				myagent: { model: "hop1" },
 			},
 		};
 		resolveConfigAliases(config);
-		expect(config.agent.myagent.model).toBe("a1");
+		expect(config.agent.myagent.model).toBe("hop1");
 		expect(config.agent.myagent.variant).toBeUndefined();
 	});
 });
