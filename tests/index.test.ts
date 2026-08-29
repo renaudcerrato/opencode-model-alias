@@ -14,13 +14,23 @@ jest.mock("node:os", () => ({
 
 jest.mock("node:fs", () => {
 	const mockFs: Record<string, string> = {};
+	// Keys registered here behave like directories: readFileSync throws
+	// EISDIR, renameSync onto them throws EISDIR, existsSync returns true.
+	const mockDirs = new Set<string>();
 	return {
 		existsSync: (pathLike: any) => {
 			const key = pathLike.toString();
-			return key in mockFs;
+			return key in mockFs || mockDirs.has(key);
 		},
 		readFileSync: (pathLike: any, _encoding?: any) => {
 			const key = pathLike.toString();
+			if (mockDirs.has(key)) {
+				const error: NodeJS.ErrnoException = new Error(
+					`EISDIR: illegal operation on a directory, read '${key}'`,
+				);
+				error.code = "EISDIR";
+				throw error;
+			}
 			if (key in mockFs) return mockFs[key];
 			const error: NodeJS.ErrnoException = new Error(
 				`ENOENT: no such file or directory, open '${key}'`,
@@ -30,6 +40,13 @@ jest.mock("node:fs", () => {
 		},
 		writeFileSync: (pathLike: any, content: any) => {
 			const key = pathLike.toString();
+			if (mockDirs.has(key)) {
+				const error: NodeJS.ErrnoException = new Error(
+					`EISDIR: illegal operation on a directory, write '${key}'`,
+				);
+				error.code = "EISDIR";
+				throw error;
+			}
 			mockFs[key] = content;
 		},
 		renameSync: (from: any, to: any) => {
@@ -42,6 +59,13 @@ jest.mock("node:fs", () => {
 				error.code = "ENOENT";
 				throw error;
 			}
+			if (mockDirs.has(dst)) {
+				const error: NodeJS.ErrnoException = new Error(
+					`EISDIR: illegal operation on a directory, rename '${src}' -> '${dst}'`,
+				);
+				error.code = "EISDIR";
+				throw error;
+			}
 			mockFs[dst] = mockFs[src];
 			delete mockFs[src];
 		},
@@ -51,6 +75,7 @@ jest.mock("node:fs", () => {
 			delete mockFs[key];
 		},
 		__mockFs: mockFs,
+		__mockDirs: mockDirs,
 	};
 });
 
@@ -59,6 +84,7 @@ import path from "node:path";
 import fs from "node:fs";
 
 const mockFs = (fs as any).__mockFs;
+const mockDirs: Set<string> = (fs as any).__mockDirs;
 const ALIAS_FILE = `${homedir()}/.config/opencode/model-aliases.json`;
 const CONFIG_DIR_PATH = `${homedir()}/.config/opencode`;
 
@@ -139,6 +165,7 @@ afterEach(() => {
 	while (fsRestorers.length > 0) {
 		fsRestorers.pop()!();
 	}
+	mockDirs.clear();
 });
 
 describe("resolveAlias", () => {
@@ -295,6 +322,15 @@ describe("readAliases", () => {
 		expect(() => readAliases()).toThrow(/non-empty string 'variant' field/);
 	});
 
+	test("rejects whitespace-only variant (aligns with set-time validation)", () => {
+		// A whitespace variant is never in a supported-variants list; accepting
+		// it here would let the config hook overwrite an agent's configured
+		// variant with garbage.
+		mockFs[ALIAS_FILE] =
+			'{"bad": {"model": "openai/gpt-4o", "variant": "  "}}';
+		expect(() => readAliases()).toThrow(/non-empty string 'variant' field/);
+	});
+
 	test("rejects primitive JSON root (number)", () => {
 		mockFs[ALIAS_FILE] = "42";
 		expect(() => readAliases()).toThrow(/JSON object/);
@@ -345,6 +381,105 @@ describe("readAliases", () => {
 		});
 		// Prototype pollution guard: the parse must not taint Object.prototype.
 		expect(({} as any).polluted).toBeUndefined();
+	});
+});
+
+describe("alias file encoding and shape reality", () => {
+	beforeEach(() => {
+		Object.keys(mockFs).forEach((key) => delete mockFs[key]);
+	});
+
+	test("tolerates a leading UTF-8 BOM and parses the aliases", () => {
+		// Windows editors and PowerShell emit a BOM; the file is valid JSON
+		// apart from it, so it must parse.
+		mockFs[ALIAS_FILE] = "\uFEFF" + '{"cheap": "openai/gpt-4o-mini"}';
+		expect(readAliases()).toEqual({
+			cheap: { model: "openai/gpt-4o-mini" },
+		});
+	});
+
+	test("BOM file resolves through the config hook and lists without error", async () => {
+		mockFs[ALIAS_FILE] = "\uFEFF" + '{"cheap": "openai/gpt-4o-mini"}';
+		const config: any = {
+			agent: { myagent: { model: "cheap" } },
+		};
+		resolveConfigAliases(config);
+		expect(config.agent.myagent.model).toBe("openai/gpt-4o-mini");
+		const listResult = await handleAliasCommand("list", fetchProvidersOk);
+		expect(listResult).toBe("Model aliases:\n  cheap → openai/gpt-4o-mini");
+	});
+
+	test("treats a zero-byte file as no aliases", () => {
+		// The plugin never creates the file, so users often touch it first.
+		mockFs[ALIAS_FILE] = "";
+		expect(readAliases()).toEqual({});
+	});
+
+	test("treats a whitespace-only file as no aliases", () => {
+		mockFs[ALIAS_FILE] = "  \n\t";
+		expect(readAliases()).toEqual({});
+	});
+
+	test("empty file lists as no aliases and does not write", async () => {
+		mockFs[ALIAS_FILE] = "";
+		const result = await handleAliasCommand("list", fetchProvidersOk);
+		expect(result).toBe(
+			"No aliases defined. Use 'alias set <key> <provider/model> [variant]' to add one.",
+		);
+		expect(mockFs[ALIAS_FILE]).toBe("");
+	});
+
+	test("empty file is tolerated at startup (aliases simply not applied)", () => {
+		mockFs[ALIAS_FILE] = "";
+		const config: any = {
+			agent: { myagent: { model: "cheap" } },
+		};
+		expect(() => resolveConfigAliases(config)).not.toThrow();
+		expect(config.agent.myagent.model).toBe("cheap");
+	});
+
+	test("fails closed when the alias file is a directory", async () => {
+		mockDirs.add(ALIAS_FILE);
+		const listResult = await handleAliasCommand("list", fetchProvidersOk);
+		expect(listResult).toMatch(/^Error: alias file unreadable:/);
+		// set fails closed too and writes nothing.
+		const setResult = await handleAliasCommand(
+			"set cheap openai/gpt-4o-mini",
+			fetchProvidersOk,
+		);
+		expect(setResult).toMatch(/^Error: alias file unreadable:/);
+		expect(mockFs[ALIAS_FILE]).toBeUndefined();
+		// Startup tolerance: resolution is skipped, config untouched.
+		const config: any = {
+			agent: { myagent: { model: "cheap" } },
+		};
+		expect(() => resolveConfigAliases(config)).not.toThrow();
+		expect(config.agent.myagent.model).toBe("cheap");
+	});
+
+	test("surfaces an error when the config dir is a file (write path)", async () => {
+		// OPENCODE_CONFIG_DIR pointing at a file: ensureConfigDir sees it
+		// "exists", and the tmp write fails with ENOTDIR (the mock is flat,
+		// so stub the write to reproduce the real filesystem's behavior).
+		mockFs[CONFIG_DIR_PATH] = "not a directory";
+		stubFs("writeFileSync", (path: string) => {
+			if (path.startsWith(`${CONFIG_DIR_PATH}/`)) {
+				const error: NodeJS.ErrnoException = new Error(
+					`ENOTDIR: not a directory, open '${path}'`,
+				);
+				error.code = "ENOTDIR";
+				throw error;
+			}
+			mockFs[path] = "written";
+		});
+		const result = await handleAliasCommand(
+			"set cheap openai/gpt-4o-mini",
+			fetchProvidersOk,
+		);
+		expect(result).toMatch(/^Error:/);
+		// No tmp file leaks.
+		const tmpKeys = Object.keys(mockFs).filter((k) => k.endsWith(".tmp"));
+		expect(tmpKeys).toEqual([]);
 	});
 });
 
@@ -1226,6 +1361,162 @@ describe("handleAliasCommand", () => {
 		expect(result).toContain("Alias 'my' deleted");
 	});
 
+	test("quoted arguments are not unquoted (fail closed, nothing written)", async () => {
+		// Shell-habit input: quotes stay part of the token. Pin the visible
+		// outcome so a future unquoting feature is a deliberate change.
+		const result = await handleAliasCommand(
+			'set cheap "openai/gpt-4o-mini"',
+			fetchProvidersOk,
+		);
+		expect(result).toBe(
+			"Error: model '\"openai/gpt-4o-mini\"' is not available from a known provider",
+		);
+		expect(mockFs[ALIAS_FILE]).toBeUndefined();
+	});
+
+	test("quoted variant is rejected with the quoted name in the error", async () => {
+		const result = await handleAliasCommand(
+			'set smart ollama-cloud/glm-5.3-flash "max"',
+			fetchProvidersOk,
+		);
+		expect(result).toBe(
+			"Error: variant '\"max\"' is not listed for model 'ollama-cloud/glm-5.3-flash'. Supported variants: max.",
+		);
+		expect(mockFs[ALIAS_FILE]).toBeUndefined();
+	});
+
+	test("set after delete recreates the alias cleanly", async () => {
+		await handleAliasCommand("set cheap openai/gpt-4o-mini", fetchProvidersOk);
+		await handleAliasCommand("delete cheap", fetchProvidersOk);
+		const result = await handleAliasCommand(
+			"set cheap openai/gpt-4o",
+			fetchProvidersOk,
+		);
+		expect(result).toContain("Alias 'cheap' set to 'openai/gpt-4o'");
+		expect(readAliases()).toEqual({ cheap: { model: "openai/gpt-4o" } });
+	});
+
+	test("reports concurrent change when the file vanishes before the re-read", async () => {
+		mockFs[ALIAS_FILE] = '{"cheap": "openai/gpt-4o-mini"}';
+		let reads = 0;
+		stubFs("readFileSync", (path: string) => {
+			if (path === ALIAS_FILE) {
+				reads++;
+				if (reads >= 2) {
+					// TOCTOU: another process deleted the file between the
+					// snapshot and the concurrency re-read.
+					const error: NodeJS.ErrnoException = new Error(
+						`ENOENT: no such file or directory, open '${path}'`,
+					);
+					error.code = "ENOENT";
+					throw error;
+				}
+				return mockFs[path];
+			}
+			return mockFs[path];
+		});
+		const result = await handleAliasCommand(
+			"set expensive openai/gpt-4o",
+			fetchProvidersOk,
+		);
+		// ENOENT on the re-read yields an empty map, which mismatches the
+		// snapshot — reported as a concurrent change, nothing written.
+		expect(result).toMatch(/changed concurrently/);
+		expect(mockFs[ALIAS_FILE]).toBe('{"cheap": "openai/gpt-4o-mini"}');
+	});
+
+	test("fails closed when the file becomes a directory before the re-read", async () => {
+		mockFs[ALIAS_FILE] = '{"cheap": "openai/gpt-4o-mini"}';
+		let reads = 0;
+		stubFs("readFileSync", (path: string) => {
+			if (path === ALIAS_FILE) {
+				reads++;
+				if (reads >= 2) {
+					const error: NodeJS.ErrnoException = new Error(
+						`EISDIR: illegal operation on a directory, read '${path}'`,
+					);
+					error.code = "EISDIR";
+					throw error;
+				}
+				return mockFs[path];
+			}
+			return mockFs[path];
+		});
+		const result = await handleAliasCommand(
+			"set expensive openai/gpt-4o",
+			fetchProvidersOk,
+		);
+		expect(result).toMatch(/^Error: alias file unreadable:/);
+		expect(mockFs[ALIAS_FILE]).toBe('{"cheap": "openai/gpt-4o-mini"}');
+	});
+
+	test("keys are case-sensitive: Cheap and cheap coexist", async () => {
+		await handleAliasCommand("set Cheap openai/gpt-4o", fetchProvidersOk);
+		await handleAliasCommand(
+			"set cheap openai/gpt-4o-mini",
+			fetchProvidersOk,
+		);
+		expect(readAliases()).toEqual({
+			Cheap: { model: "openai/gpt-4o" },
+			cheap: { model: "openai/gpt-4o-mini" },
+		});
+	});
+
+	test("flag-like and numeric keys are set and listed verbatim", async () => {
+		await handleAliasCommand("set --foo openai/gpt-4o", fetchProvidersOk);
+		await handleAliasCommand("set 1 openai/gpt-4o-mini", fetchProvidersOk);
+		const listResult = await handleAliasCommand("list", fetchProvidersOk);
+		expect(listResult).toContain("--foo → openai/gpt-4o");
+		// Numeric-like keys are integer-index properties: JS hoists them to
+		// the front of the object on every rewrite, so "1" lists first.
+		const lines = listResult.split("\n");
+		expect(lines[1]).toContain("1 → openai/gpt-4o-mini");
+		expect(lines[2]).toContain("--foo → openai/gpt-4o");
+	});
+
+	test("mixed-form duplicate JSON keys resolve last-wins", () => {
+		mockFs[ALIAS_FILE] =
+			'{"cheap": "openai/gpt-4o", "cheap": {"model": "openai/gpt-4o-mini", "variant": "max"}}';
+		const aliases = readAliases();
+		expect(aliases).toEqual({
+			cheap: { model: "openai/gpt-4o-mini", variant: "max" },
+		});
+		// The reverse ordering survives too (object then string).
+		mockFs[ALIAS_FILE] =
+			'{"cheap": {"model": "openai/gpt-4o-mini", "variant": "max"}, "cheap": "openai/gpt-4o"}';
+		expect(readAliases()).toEqual({
+			cheap: { model: "openai/gpt-4o" },
+		});
+	});
+
+	test("provider id differing only in case is not the same provider", async () => {
+		const result = await handleAliasCommand(
+			"set x OpenAI/gpt-4o-mini",
+			fetchProvidersOk,
+		);
+		expect(result).toBe(
+			"Error: model 'OpenAI/gpt-4o-mini' is not available from a known provider",
+		);
+		expect(mockFs[ALIAS_FILE]).toBeUndefined();
+	});
+
+	test("model ids with regex-special characters match by exact string", async () => {
+		const result = await handleAliasCommand(
+			"set weird openai/gpt-4o(1)+v2.name",
+			async () =>
+				[
+					{
+						id: "openai",
+						models: [{ id: "gpt-4o(1)+v2.name", variants: { max: {} } }],
+					},
+				] as any,
+		);
+		expect(result).toContain("Alias 'weird' set");
+		expect(readAliases()).toEqual({
+			weird: { model: "openai/gpt-4o(1)+v2.name" },
+		});
+	});
+
 	test("set - repoints an existing alias to a different model and drops the old target", async () => {
 		mockFs[ALIAS_FILE] = '{"cheap": "openai/gpt-4o-mini"}';
 		const result = await handleAliasCommand(
@@ -1448,6 +1739,77 @@ describe("resolveConfigAliases", () => {
 		expect(() => resolveConfigAliases(config)).not.toThrow();
 		expect(() => resolveConfigAliases({} as any)).not.toThrow();
 	});
+
+	test("frozen agent entry is tolerated without corrupting sibling resolution", () => {
+		mockFs[ALIAS_FILE] = '{"cheap": "openai/gpt-4o-mini"}';
+		const frozenEntry = Object.freeze({ model: "cheap" });
+		const config: any = {
+			agent: {
+				frozen: frozenEntry,
+				normal: { model: "cheap" },
+			},
+		};
+		expect(() => resolveConfigAliases(config)).not.toThrow();
+		// The normal sibling is still resolved.
+		expect(config.agent.normal.model).toBe("openai/gpt-4o-mini");
+		// The frozen entry is left untouched rather than crashing the hook.
+		expect(config.agent.frozen.model).toBe("cheap");
+	});
+
+	test("fully frozen config is tolerated (command registration skipped)", async () => {
+		mockFs[ALIAS_FILE] = '{"cheap": "openai/gpt-4o-mini"}';
+		const config: any = Object.freeze({
+			agent: { myagent: { model: "cheap" } },
+		});
+		const plugin = await aliasPlugin({
+			client: makeClient({}),
+			directory: "/tmp/proj",
+		} as any);
+		await expect(plugin.config(config)).resolves.toBeUndefined();
+		// The frozen top level blocks command registration, but the nested
+		// agent entry is still writable, so alias resolution still applies.
+		expect(config.command).toBeUndefined();
+		expect(config.agent.myagent.model).toBe("openai/gpt-4o-mini");
+	});
+
+	test("getter-only model field is tolerated (entry left untouched)", () => {
+		mockFs[ALIAS_FILE] = '{"cheap": "openai/gpt-4o-mini"}';
+		const entry: any = {};
+		Object.defineProperty(entry, "model", {
+			get: () => "cheap",
+			enumerable: true,
+		});
+		const config: any = {
+			agent: { guarded: entry },
+		};
+		expect(() => resolveConfigAliases(config)).not.toThrow();
+		expect(config.agent.guarded.model).toBe("cheap");
+	});
+
+	test("array and number section entries and variant-without-model are tolerated", () => {
+		mockFs[ALIAS_FILE] = '{"cheap": "openai/gpt-4o-mini"}';
+		const config: any = {
+			agent: {
+				arrayEntry: ["a"],
+				numberEntry: 42,
+				variantOnly: { variant: "max" },
+			},
+		};
+		expect(() => resolveConfigAliases(config)).not.toThrow();
+		expect(config.agent.variantOnly.variant).toBe("max");
+		expect(config.agent.variantOnly.model).toBeUndefined();
+	});
+
+	test("agent section as an array is tolerated", () => {
+		mockFs[ALIAS_FILE] = '{"cheap": "openai/gpt-4o-mini"}';
+		const config: any = {
+			agent: [{ model: "cheap" }],
+		};
+		expect(() => resolveConfigAliases(config)).not.toThrow();
+		// Array entries are iterated by Object.values and each is an object,
+		// so the entry is resolved like any other.
+		expect(config.agent[0].model).toBe("openai/gpt-4o-mini");
+	});
 });
 
 describe("config dir resolution", () => {
@@ -1485,6 +1847,66 @@ describe("config dir resolution", () => {
 		delete process.env.OPENCODE_CONFIG_DIR;
 		process.env.XDG_CONFIG_HOME = "   ";
 		expect(resolveConfigDir()).toBe("/home/test/.config/opencode");
+	});
+});
+
+describe("env-driven alias file location (module-load wiring)", () => {
+	const originalEnv = { ...process.env };
+
+	beforeEach(() => {
+		Object.keys(mockFs).forEach((key) => delete mockFs[key]);
+	});
+
+	afterEach(() => {
+		process.env = { ...originalEnv };
+	});
+
+	test("reads and writes the alias file under OPENCODE_CONFIG_DIR when set before module load", async () => {
+		// CONFIG_DIR/ALIAS_FILE are computed at module load; this proves the
+		// env-resolved directory is the one actually used for I/O — the
+		// missing link between the pure resolveConfigDir tests above and the
+		// hardcoded-path fs tests everywhere else.
+		process.env.OPENCODE_CONFIG_DIR = "/custom config dir";
+		const envPath = "/custom config dir/model-aliases.json";
+
+		let isolated: typeof import("../src/index");
+		jest.isolateModules(() => {
+			isolated = require("../src/index");
+		});
+
+		// Write through the isolated module and observe where the file lands.
+		const setResult = await isolated.handleAliasCommand(
+			"set cheap openai/gpt-4o-mini",
+			fetchProvidersOk,
+		);
+		expect(setResult).toContain("Alias 'cheap' set");
+		expect(mockFs[envPath]).toContain('"cheap"');
+		expect(mockFs[ALIAS_FILE]).toBeUndefined();
+
+		// Read back through the isolated module's config hook.
+		const config: any = {
+			agent: { myagent: { model: "cheap" } },
+		};
+		isolated.resolveConfigAliases(config);
+		expect(config.agent.myagent.model).toBe("openai/gpt-4o-mini");
+
+		// list sees the same file.
+		const listResult = await isolated.handleAliasCommand(
+			"list",
+			fetchProvidersOk,
+		);
+		expect(listResult).toBe("Model aliases:\n  cheap → openai/gpt-4o-mini");
+	});
+
+	test("paths with spaces and trailing slashes resolve via join normalization", () => {
+		process.env.OPENCODE_CONFIG_DIR = "/custom dir/";
+		let isolated: typeof import("../src/index");
+		jest.isolateModules(() => {
+			isolated = require("../src/index");
+		});
+		// resolveConfigDir returns the dir as given (join only normalizes the
+		// final file path); the trailing slash is harmless for I/O.
+		expect(isolated.resolveConfigDir()).toBe("/custom dir/");
 	});
 });
 

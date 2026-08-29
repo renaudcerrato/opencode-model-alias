@@ -104,7 +104,7 @@ function parseAliasTarget(value: unknown, key: string): AliasTarget {
 	}
 	if (
 		record.variant !== undefined &&
-		(typeof record.variant !== "string" || !record.variant)
+		(typeof record.variant !== "string" || record.variant.trim() === "")
 	) {
 		throw new Error(
 			`alias '${key}' must have a non-empty string 'variant' field`,
@@ -127,6 +127,15 @@ function readAliases(): AliasMap {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
 		throw new Error(`alias file unreadable: ${ALIAS_FILE}`);
 	}
+	// Tolerate a leading UTF-8 BOM: Windows editors and PowerShell emit one,
+	// and JSON.parse would otherwise reject an otherwise-valid file.
+	if (raw.charCodeAt(0) === 0xfeff) {
+		raw = raw.slice(1);
+	}
+	// A zero-byte or whitespace-only file means "no aliases yet" (the plugin
+	// never creates the file, so users often touch it first), not a corrupt
+	// file.
+	if (raw.trim() === "") return {};
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(raw);
@@ -287,19 +296,25 @@ type ModelConfig = { model?: unknown } & Record<string, unknown>;
 
 // Apply alias resolution to one agent/command entry: rewrite the model to
 // its terminal target and let an alias-provided variant win over the
-// configured variant.
+// configured variant. Assignment failures (frozen entries, getter-only
+// model fields) are tolerated: one hostile entry must not abort the whole
+// config hook and break OpenCode startup.
 function applyAliasToEntry(
 	entryConfig: ModelConfig,
 	aliases: AliasMap,
 ): void {
 	if (typeof entryConfig.model !== "string") return;
 	const resolved = resolveAliasDetails(entryConfig.model, aliases);
-	if (resolved.value && resolved.value !== entryConfig.model) {
-		entryConfig.model = resolved.value;
-	}
-	// Alias-provided variant wins over the configured variant.
-	if (resolved.variant) {
-		entryConfig.variant = resolved.variant;
+	try {
+		if (resolved.value && resolved.value !== entryConfig.model) {
+			entryConfig.model = resolved.value;
+		}
+		// Alias-provided variant wins over the configured variant.
+		if (resolved.variant) {
+			entryConfig.variant = resolved.variant;
+		}
+	} catch {
+		// Frozen/sealed entry or getter-only property: leave it untouched.
 	}
 }
 
@@ -626,13 +641,21 @@ export const aliasPlugin: Plugin = async ({ client, directory }) => {
 
 	return {
 		config: async (opencodeConfig: Config) => {
-			opencodeConfig.command ??= {};
-			// Only register /alias if the user has not defined their own.
-			if (!Object.hasOwn(opencodeConfig.command, "alias")) {
-				opencodeConfig.command.alias = {
-					template: "",
-					description: "Manage model aliases (list, set, delete)",
-				};
+			// The command registration and alias resolution below assign into
+			// the host's config object. A frozen config must not crash the
+			// hook (and with it OpenCode startup), so tolerate assignment
+			// failures and resolve what we can.
+			try {
+				opencodeConfig.command ??= {};
+				// Only register /alias if the user has not defined their own.
+				if (!Object.hasOwn(opencodeConfig.command, "alias")) {
+					opencodeConfig.command.alias = {
+						template: "",
+						description: "Manage model aliases (list, set, delete)",
+					};
+				}
+			} catch {
+				// Frozen/sealed config or command section: skip registration.
 			}
 
 			resolveConfigAliases(opencodeConfig);
