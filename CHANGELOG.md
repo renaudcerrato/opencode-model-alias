@@ -2,6 +2,34 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.1.0] - 2026-08-29
+
+### Added
+- Object alias form `{ "model": "provider/model", "variant": "..." }` alongside legacy string aliases.
+- Model variants: validated against provider metadata at set time (fail-closed, with supported-variants hint); alias-provided variants override agent/command-configured variants.
+- Recursive alias chains (up to 16 hops) with cycle detection; string aliases inherit the variant of the nearest outer object-form entry.
+- Fail-closed reads: invalid/unreadable alias files produce explicit errors for `/alias` commands; startup stays tolerant.
+- Atomic writes (temp file + rename, mode 0600) with concurrent-modification checks on both `set` and `delete`.
+- Config directory resolution mirroring OpenCode: `OPENCODE_CONFIG_DIR`, then `$XDG_CONFIG_HOME/opencode`, then `~/.config/opencode`.
+- `/alias set <key> <provider/model> [variant]` with single provider-list fetch per set.
+- Test suite: 182 tests with fs mocks; CI test workflow with coverage summary.
+
+### Changed
+- `/alias list` now shows the effective (own or inherited) variant per alias.
+- Object-form `model` values are validated as `provider/model` identifiers at read time.
+- CI: actions pinned by SHA, least-privilege `permissions`, coverage summary from a single test run.
+- Simplified provider verification: a single `fetchProviders` callback replaces the dual probe/list path; an empty provider list fails closed.
+- Coverage enforced at 100% (statements/branches/functions/lines); README badges auto-updated by CI.
+- `/alias delete <key> [force]`: deleting an alias referenced by other aliases is refused (naming the dependents) unless `force` is given, so chains are never silently broken; unexpected extra arguments to `delete` are now rejected instead of ignored.
+- `/alias help` documents the `force` flag.
+
+### Fixed
+- `writeAliases` no longer corrupts alias-to-alias chains: entries without a variant are serialized in string form (the normalized object form was rejected by the reader on the next command, making the file unreadable after any `set`/`delete` on a chained file).
+- A leading UTF-8 BOM in the alias file is tolerated (Windows editors and PowerShell emit one); previously every alias silently stopped working.
+- A zero-byte or whitespace-only alias file is treated as "no aliases yet" instead of a parse error.
+- Whitespace-only `variant` values in hand-edited files are rejected, matching set-time validation.
+- The config hook tolerates frozen/sealed configs and getter-only `model` fields instead of crashing startup.
+
 ## [1.0.5] - 2026-04-08
 
 ### Changed

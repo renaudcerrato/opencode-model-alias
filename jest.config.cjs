@@ -1,5 +1,6 @@
 module.exports = {
   testEnvironment: "node",
+  setupFiles: ["<rootDir>/tests/setup.cjs"],
   transform: {
     "^.+\\.tsx?$": [
       "ts-jest",
@@ -9,4 +10,12 @@ module.exports = {
     ],
   },
   collectCoverageFrom: ["src/**/*.ts"],
+  coverageThreshold: {
+    global: {
+      statements: 100,
+      branches: 100,
+      functions: 100,
+      lines: 100,
+    },
+  },
 };
