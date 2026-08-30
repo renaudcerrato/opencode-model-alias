@@ -88,7 +88,7 @@ const mockDirs: Set<string> = (fs as any).__mockDirs;
 const ALIAS_FILE = `${homedir()}/.config/opencode/model-aliases.json`;
 const CONFIG_DIR_PATH = `${homedir()}/.config/opencode`;
 
-import pluginModule, {
+import {
 	ensureConfigDir,
 	readAliases,
 	writeAliases,
@@ -96,9 +96,8 @@ import pluginModule, {
 	resolveConfigAliases,
 	resolveConfigDir,
 	handleAliasCommand,
-	aliasPlugin,
-	server,
-} from "../src/index";
+} from "../src/alias-core.js";
+import pluginModule, { aliasPlugin, server } from "../src/server.js";
 
 const SUPPORTED_VARIANT = "max";
 
@@ -1949,9 +1948,9 @@ describe("env-driven alias file location (module-load wiring)", () => {
 		process.env.OPENCODE_CONFIG_DIR = "/custom config dir";
 		const envPath = "/custom config dir/model-aliases.json";
 
-		let isolated: typeof import("../src/index");
+		let isolated: typeof import("../src/alias-core.js");
 		jest.isolateModules(() => {
-			isolated = require("../src/index");
+			isolated = require("../src/alias-core.js");
 		});
 
 		// Write through the isolated module and observe where the file lands.
@@ -1980,9 +1979,9 @@ describe("env-driven alias file location (module-load wiring)", () => {
 
 	test("paths with spaces and trailing slashes resolve via join normalization", () => {
 		process.env.OPENCODE_CONFIG_DIR = "/custom dir/";
-		let isolated: typeof import("../src/index");
+		let isolated: typeof import("../src/alias-core.js");
 		jest.isolateModules(() => {
-			isolated = require("../src/index");
+			isolated = require("../src/alias-core.js");
 		});
 		// resolveConfigDir returns the dir as given (join only normalizes the
 		// final file path); the trailing slash is harmless for I/O.
@@ -1995,7 +1994,7 @@ describe("plugin wiring", () => {
 		Object.keys(mockFs).forEach((key) => delete mockFs[key]);
 	});
 
-	test("config hook registers /alias command and resolves aliases", async () => {
+	test("config hook resolves aliases without registering any command", async () => {
 		mockFs[ALIAS_FILE] = '{"cheap": "openai/gpt-4o-mini"}';
 		const plugin = await aliasPlugin({
 			client: makeClient({}),
@@ -2005,14 +2004,13 @@ describe("plugin wiring", () => {
 			agent: { myagent: { model: "cheap" } },
 		};
 		await plugin.config(config);
-		expect(config.command.alias).toEqual({
-			template: "",
-			description: expect.any(String),
-		});
+		// The /alias command is owned by the TUI plugin; the server plugin
+		// must not register (or touch) any command section.
+		expect(config.command).toBeUndefined();
 		expect(config.agent.myagent.model).toBe("openai/gpt-4o-mini");
 	});
 
-	test("config hook preserves a user-defined alias command", async () => {
+	test("config hook leaves an existing command section untouched", async () => {
 		const plugin = await aliasPlugin({
 			client: makeClient({}),
 			directory: "/tmp/proj",
@@ -2027,181 +2025,6 @@ describe("plugin wiring", () => {
 		expect(config.command.alias).toEqual({
 			template: "custom template",
 			description: "mine",
-		});
-	});
-
-	test("command.execute.before catches handler errors and reports them", async () => {
-		const plugin = await aliasPlugin({
-			client: makeClient({}),
-			directory: "/tmp/proj",
-		} as any);
-		const output: any = { parts: [] };
-		// arguments: undefined makes args.trim() throw inside the handler.
-		await plugin["command.execute.before"]!(
-			{ command: "alias", arguments: undefined } as any,
-			output,
-		);
-		expect(output.parts).toHaveLength(1);
-		expect(output.parts[0].text).toMatch(/^Error:/);
-		expect(output.parts[0].ignored).toBe(true);
-	});
-
-	test("command.execute.before catches non-Error throws", async () => {
-		const plugin = await aliasPlugin({
-			client: makeClient({}),
-			directory: "/tmp/proj",
-		} as any);
-		const output: any = { parts: [] };
-		// arguments: undefined makes args.trim() throw a TypeError (an Error),
-		// so stub the command handler input to throw a non-Error instead.
-		await plugin["command.execute.before"]!(
-			{ command: "alias", get arguments() { throw "boom"; } } as any,
-			output,
-		);
-		expect(output.parts).toHaveLength(1);
-		expect(output.parts[0].text).toBe("Error: alias command failed");
-		expect(output.parts[0].ignored).toBe(true);
-	});
-
-	test("command.execute.before intercepts alias command", async () => {
-		const plugin = await aliasPlugin({
-			client: makeClient({}),
-			directory: "/tmp/proj",
-		} as any);
-		const output: any = {
-			parts: [{ type: "text", text: "original" }],
-		};
-		await plugin["command.execute.before"]!(
-			{ command: "alias", arguments: "list" } as any,
-			output,
-		);
-		expect(output.parts).toHaveLength(1);
-		expect(output.parts[0].text).toBe(
-			"No aliases defined. Use 'alias set <key> <provider/model> [variant]' to add one.",
-		);
-		expect(output.parts[0].ignored).toBe(true);
-	});
-
-	test("command.execute.before ignores other commands", async () => {
-		const plugin = await aliasPlugin({
-			client: makeClient({}),
-			directory: "/tmp/proj",
-		} as any);
-		const output: any = {
-			parts: [{ type: "text", text: "keep me" }],
-		};
-		await plugin["command.execute.before"]!(
-			{ command: "other", arguments: "" } as any,
-			output,
-		);
-		expect(output.parts[0].text).toBe("keep me");
-	});
-
-	test("provider list error surfaces in set verification", async () => {
-		const plugin = await aliasPlugin({
-			client: makeClient({ providerError: { code: 500 } }),
-			directory: "/tmp/proj",
-		} as any);
-		const output: any = { parts: [] };
-		await plugin["command.execute.before"]!(
-			{ command: "alias", arguments: "set cheap openai/gpt-4o-mini" } as any,
-			output,
-		);
-		expect(output.parts[0].text).toMatch(/^Error: could not verify model/);
-	});
-
-	test("provider list unexpected shape surfaces in set verification", async () => {
-		const plugin = await aliasPlugin({
-			client: {
-				provider: {
-					list: jest.fn(async () => ({ error: undefined, data: null })),
-				},
-			} as any,
-			directory: "/tmp/proj",
-		} as any);
-		const output: any = { parts: [] };
-		await plugin["command.execute.before"]!(
-			{ command: "alias", arguments: "set cheap openai/gpt-4o-mini" } as any,
-			output,
-		);
-		expect(output.parts[0].text).toMatch(/^Error: could not verify model/);
-	});
-
-	test("provider list with non-array data.all surfaces in set verification", async () => {
-		const plugin = await aliasPlugin({
-			client: {
-				provider: {
-					list: jest.fn(async () => ({ error: undefined, data: {} })),
-				},
-			} as any,
-			directory: "/tmp/proj",
-		} as any);
-		const output: any = { parts: [] };
-		await plugin["command.execute.before"]!(
-			{ command: "alias", arguments: "set cheap openai/gpt-4o-mini" } as any,
-			output,
-		);
-		expect(output.parts[0].text).toMatch(/^Error: could not verify model/);
-	});
-
-	test("set through the plugin fetches the provider list and succeeds", async () => {
-		const plugin = await aliasPlugin({
-			client: makeClient({
-				providerList: [
-					{
-						id: "openai",
-						models: [{ id: "gpt-4o-mini" }],
-					},
-				],
-			}),
-			directory: "/tmp/proj",
-		} as any);
-		const output: any = { parts: [] };
-		await plugin["command.execute.before"]!(
-			{ command: "alias", arguments: "set cheap openai/gpt-4o-mini" } as any,
-			output,
-		);
-		expect(output.parts[0].text).toContain("Alias 'cheap' set");
-		expect(readAliases()).toEqual({
-			cheap: { model: "openai/gpt-4o-mini" },
-		});
-	});
-
-	test("set verifies against a realistic provider payload with extra fields and record-keyed models", async () => {
-		// Real SDK payloads carry provider-level extras (name, config, ...) and
-		// model entries with extras; depending on SDK version, models may be a
-		// record keyed by model id rather than an array.
-		const plugin = await aliasPlugin({
-			client: makeClient({
-				providerList: [
-					{
-						id: "ollama-cloud",
-						name: "Ollama Cloud",
-						config: { baseURL: "https://ollama.com" },
-						models: {
-							"glm-5.3-flash": {
-								id: "glm-5.3-flash",
-								name: "GLM 5.3 Flash",
-								options: { temperature: 0.7 },
-								variants: { max: { context: 200000 } },
-							},
-						},
-					},
-				],
-			}),
-			directory: "/tmp/proj",
-		} as any);
-		const output: any = { parts: [] };
-		await plugin["command.execute.before"]!(
-			{
-				command: "alias",
-				arguments: "set smart ollama-cloud/glm-5.3-flash max",
-			} as any,
-			output,
-		);
-		expect(output.parts[0].text).toContain("Alias 'smart' set");
-		expect(readAliases()).toEqual({
-			smart: { model: "ollama-cloud/glm-5.3-flash", variant: "max" },
 		});
 	});
 

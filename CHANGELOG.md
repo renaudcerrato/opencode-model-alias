@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.0] - 2026-08-30
+
+### Added
+- Dual-target plugin: `./server` (config-hook alias resolution) and `./tui` (dialog-driven `/alias` command) from one package, installable with a single `opencode plugin install` (patches both `opencode.json` and `tui.json`).
+- TUI `/alias` command: dialog menu (List / Set / Delete / Help) that manages the alias file entirely client-side — no session interaction, no agent turn, no transcript pollution.
+- Set flow prompts for name, `provider/model`, and optional variant, validating against the provider list before writing; delete flow refuses to break chains.
+
+### Changed
+- The server plugin no longer registers a `/alias` server command: server-side slash commands always trigger an agent LLM turn (OpenCode's command pipeline calls the prompt loop unconditionally), so the command moved to the TUI where it can reply without one.
+- `package.json` exports `./server` and `./tui`; `main` removed (the loader resolves targets exclusively via `exports` when present).
+
 ## [1.1.0] - 2026-08-29
 
 ### Added

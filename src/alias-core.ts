@@ -38,8 +38,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { Config, Plugin, PluginModule } from "@opencode-ai/plugin";
-import type { Part } from "@opencode-ai/sdk";
+import type { Config } from "@opencode-ai/plugin";
 
 // Mirror opencode's own global-config resolution (packages/core/src/global.ts):
 //   1. OPENCODE_CONFIG_DIR env var, if set
@@ -409,6 +408,8 @@ export {
 
 type FetchProviders = () => Promise<ProviderListEntry[]>;
 
+export type { FetchProviders, ProviderListEntry };
+
 function aliasHelp(): string {
 	return `Usage: /alias <subcommand> [options]
 
@@ -646,70 +647,3 @@ async function handleAliasCommand(
 	}
 	return "Unknown subcommand. Use 'alias help' for usage information.";
 }
-
-export const aliasPlugin: Plugin = async ({ client, directory }) => {
-	const fetchProviderList = async (): Promise<ProviderListEntry[]> => {
-		const response = await client.provider.list({ query: { directory } });
-		if (response.error) {
-			throw new Error(
-				`provider list failed: ${JSON.stringify(response.error)}`,
-			);
-		}
-		const data = response.data;
-		if (!data || !Array.isArray(data.all)) {
-			throw new Error("provider list returned an unexpected shape");
-		}
-		return data.all;
-	};
-
-	return {
-		config: async (opencodeConfig: Config) => {
-			// The command registration and alias resolution below assign into
-			// the host's config object. A frozen config must not crash the
-			// hook (and with it OpenCode startup), so tolerate assignment
-			// failures and resolve what we can.
-			try {
-				opencodeConfig.command ??= {};
-				// Only register /alias if the user has not defined their own.
-				if (!Object.hasOwn(opencodeConfig.command, "alias")) {
-					opencodeConfig.command.alias = {
-						template: "",
-						description: "Manage model aliases (list, set, delete)",
-					};
-				}
-			} catch {
-				// Frozen/sealed config or command section: skip registration.
-			}
-
-			resolveConfigAliases(opencodeConfig);
-		},
-		"command.execute.before": async (input, output) => {
-			if (input.command === "alias") {
-				let result: string;
-				try {
-					result = await handleAliasCommand(
-						input.arguments,
-						fetchProviderList,
-					);
-				} catch (error) {
-					result = `Error: ${error instanceof Error ? error.message : "alias command failed"}`;
-				}
-				const part = {
-					type: "text",
-					text: result,
-					ignored: true,
-				} as Part;
-				output.parts.splice(0, output.parts.length, part);
-			}
-		},
-	};
-};
-
-export const server = aliasPlugin;
-
-const pluginModule: PluginModule = {
-	id: "opencode-model-alias",
-	server,
-};
-
-export default pluginModule;

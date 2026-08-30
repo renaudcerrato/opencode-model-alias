@@ -15,17 +15,31 @@
 
 ## Installation
 
-Clone the repo to a local workspace:
+Install the plugin (registers both the server and TUI targets in one step):
 
 ```sh
-git clone https://github.com/renaudcerrato/opencode-model-alias.git ~/workspace/opencode-model-alias
+opencode plugin install -g /path/to/opencode-model-alias
 ```
 
-Then add the plugin to your OpenCode config (`opencode.jsonc`):
+Or clone the repo and add it to your OpenCode config (`opencode.jsonc`):
 
 ```json
 {
-  "plugin": ["~/workspace/opencode-model-alias"]
+  "plugin": ["/path/to/opencode-model-alias"]
+}
+```
+
+The plugin ships two modules from one package:
+
+- `./server` — resolves aliases in agent/command configs at startup
+- `./tui` — the dialog-driven `/alias` command (list, set, delete) that manages the alias file **without touching the session** — no agent turn, no transcript pollution
+
+For the TUI half, add the same spec to `tui.json` (or use `opencode plugin install`, which patches both configs automatically):
+
+```json
+{
+  "$schema": "https://opencode.ai/tui.json",
+  "plugin": ["/path/to/opencode-model-alias"]
 }
 ```
 
@@ -78,32 +92,14 @@ Now your command configuration is portable, and each computer maps "cheap" to wh
 
 ### The `/alias` Command
 
-Manage model aliases directly from OpenCode:
+Selecting `/alias` from the autocomplete opens a dialog menu:
 
-```bash
-# List all aliases
-/alias list
+- **List aliases** — shows every alias with its chain and effective variant
+- **Set alias** — prompts for name, `provider/model`, and optional variant; validates against the provider list before writing
+- **Delete alias** — pick from existing aliases; refuses to break chains unless forced
+- **Help** — shows the alias help text
 
-# Set a new alias
-/alias set cheap openai/gpt-4o-mini
-
-# Set an alias with a model variant
-/alias set smart ollama-cloud/glm-5.3-flash max
-
-# Delete an alias
-/alias delete cheap
-
-# Delete an alias that other aliases chain through (requires force)
-/alias delete intermediate force
-
-# Show help
-/alias help
-
-# Show available models in correct format
-!opencode models
-```
-
-Tip: type `!opencode models` in the TUI to list the currently available models in the correct provider/model format.
+Results appear as toasts; nothing is sent to the session, so no agent turn is triggered. Tip: type `!opencode models` in the TUI to list the currently available models in the correct `provider/model` format.
 
 > **Important:** Restart OpenCode after adding, updating, or deleting aliases so the new mappings load into your session.
 
@@ -172,19 +168,13 @@ Rules:
 - Deleting an alias that other aliases chain through is refused: the delete names the dependent aliases — delete those first, or bypass the check with `alias delete <key> force`.
 - Alias keys **shadow model references**: an agent/command `model` matching an alias key is always resolved through it, even if it looks like a `provider/model` identifier. Avoid naming aliases after real model ids.
 
-### The `set` Command with Variants
+### Setting Variants
 
-```bash
-# Set an alias with a variant (object form is written)
-/alias set smart ollama-cloud/glm-5.3-flash max
+The **Set alias** dialog prompts for name, `provider/model`, and an optional variant:
 
-# Setting without a variant removes any previous variant (complete replacement)
-/alias set smart ollama-cloud/glm-5.3-flash
-
-# Variants cannot be combined with alias targets
-/alias set reviewer smart max
-# Error: variant 'max' cannot be applied to alias target 'smart'
-```
+- Setting a variant writes the object form; the variant must be listed in the model's provider metadata
+- Setting without a variant removes any previous variant (complete replacement)
+- Variants cannot be applied to alias targets (string-form aliases pointing at other aliases)
 
 An unsupported variant is rejected with the list of supported ones:
 
@@ -194,19 +184,7 @@ Error: variant 'turbo' is not listed for model 'ollama-cloud/glm-5.3-flash'. Sup
 
 ### Deleting Aliases Safely
 
-Deleting an alias that other aliases chain through is refused, so a chain is never silently broken:
-
-```
-/alias delete intermediate
-# Error: alias 'intermediate' is referenced by other aliases: source. Delete those first, or use 'alias delete intermediate force'.
-```
-
-Delete the dependents first, or bypass the check with `force` (which leaves any dependent alias `[unresolved]`):
-
-```
-/alias delete intermediate force
-# Alias 'intermediate' deleted. Please restart OpenCode for the change to take effect.
-```
+Deleting an alias that other aliases chain through is refused, so a chain is never silently broken. The delete dialog names the dependent aliases — delete those first. (The underlying `alias delete <key> [force]` semantics also apply to direct `handleAliasCommand` use: `force` bypasses the check, leaving dependents `[unresolved]`.)
 
 ### Alias File Location
 
