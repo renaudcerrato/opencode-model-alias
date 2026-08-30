@@ -116,11 +116,12 @@ const fetchProvidersOk = async () =>
 		},
 	] as any;
 
-// Minimal opencode client stub for plugin-level tests: only provider.list
-// is exercised by the plugin.
+// Minimal opencode client stub for plugin-level tests: provider.list is
+// exercised by set verification, session.promptAsync by the /alias reply.
 function makeClient(overrides: {
 	providerList?: unknown;
 	providerError?: unknown;
+	promptAsync?: (...args: any[]) => Promise<unknown>;
 }) {
 	return {
 		provider: {
@@ -130,6 +131,10 @@ function makeClient(overrides: {
 				}
 				return { error: undefined, data: { all: overrides.providerList ?? [] } };
 			}),
+		},
+		session: {
+			promptAsync:
+				overrides.promptAsync ?? jest.fn(async () => ({})),
 		},
 	} as any;
 }
@@ -2031,75 +2036,123 @@ describe("plugin wiring", () => {
 	});
 
 	test("command.execute.before catches handler errors and reports them", async () => {
+		const promptAsync = jest.fn(async () => ({}));
 		const plugin = await aliasPlugin({
-			client: makeClient({}),
+			client: makeClient({ promptAsync }),
 			directory: "/tmp/proj",
 		} as any);
 		const output: any = { parts: [] };
 		// arguments: undefined makes args.trim() throw inside the handler.
 		await plugin["command.execute.before"]!(
-			{ command: "alias", arguments: undefined } as any,
+			{ command: "alias", sessionID: "ses_1", arguments: undefined } as any,
 			output,
 		);
-		expect(output.parts).toHaveLength(1);
-		expect(output.parts[0].text).toMatch(/^Error:/);
-		expect(output.parts[0].ignored).toBe(true);
+		// The error reply is delivered via the noReply prompt, not the parts.
+		expect(promptAsync).toHaveBeenCalledWith(
+			expect.objectContaining({
+				path: { id: "ses_1" },
+				body: {
+					noReply: true,
+					parts: [
+						{
+							type: "text",
+							text: expect.stringMatching(/^Error:/),
+							synthetic: true,
+						},
+					],
+				},
+			}),
+		);
+		expect(output.parts).toHaveLength(0);
 	});
 
 	test("command.execute.before catches non-Error throws", async () => {
+		const promptAsync = jest.fn(async () => ({}));
 		const plugin = await aliasPlugin({
-			client: makeClient({}),
+			client: makeClient({ promptAsync }),
 			directory: "/tmp/proj",
 		} as any);
 		const output: any = { parts: [] };
 		// arguments: undefined makes args.trim() throw a TypeError (an Error),
 		// so stub the command handler input to throw a non-Error instead.
 		await plugin["command.execute.before"]!(
-			{ command: "alias", get arguments() { throw "boom"; } } as any,
+			{
+				command: "alias",
+				sessionID: "ses_1",
+				get arguments() {
+					throw "boom";
+				},
+			} as any,
 			output,
 		);
-		expect(output.parts).toHaveLength(1);
-		expect(output.parts[0].text).toBe("Error: alias command failed");
-		expect(output.parts[0].ignored).toBe(true);
+		expect(promptAsync).toHaveBeenCalledWith(
+			expect.objectContaining({
+				body: {
+					noReply: true,
+					parts: [
+						{ type: "text", text: "Error: alias command failed", synthetic: true },
+					],
+				},
+			}),
+		);
+		expect(output.parts).toHaveLength(0);
 	});
 
-	test("command.execute.before intercepts alias command", async () => {
+	test("command.execute.before replies via noReply prompt without an agent turn", async () => {
+		const promptAsync = jest.fn(async () => ({}));
 		const plugin = await aliasPlugin({
-			client: makeClient({}),
+			client: makeClient({ promptAsync }),
 			directory: "/tmp/proj",
 		} as any);
 		const output: any = {
 			parts: [{ type: "text", text: "original" }],
 		};
 		await plugin["command.execute.before"]!(
-			{ command: "alias", arguments: "list" } as any,
+			{ command: "alias", sessionID: "ses_1", arguments: "list" } as any,
 			output,
 		);
-		expect(output.parts).toHaveLength(1);
-		expect(output.parts[0].text).toBe(
-			"No aliases defined. Use 'alias set <key> <provider/model> [variant]' to add one.",
-		);
-		expect(output.parts[0].ignored).toBe(true);
+		// The command's own user message is emptied (a zero-part user message
+		// is skipped by the model entirely) and the reply is self-submitted
+		// as a noReply prompt — the only mechanism that suppresses the agent
+		// turn.
+		expect(output.parts).toHaveLength(0);
+		expect(promptAsync).toHaveBeenCalledTimes(1);
+		expect(promptAsync).toHaveBeenCalledWith({
+			path: { id: "ses_1" },
+			body: {
+				noReply: true,
+				parts: [
+					{
+						type: "text",
+						text: "No aliases defined. Use 'alias set <key> <provider/model> [variant]' to add one.",
+						synthetic: true,
+					},
+				],
+			},
+		});
 	});
 
 	test("command.execute.before ignores other commands", async () => {
+		const promptAsync = jest.fn(async () => ({}));
 		const plugin = await aliasPlugin({
-			client: makeClient({}),
+			client: makeClient({ promptAsync }),
 			directory: "/tmp/proj",
 		} as any);
 		const output: any = {
 			parts: [{ type: "text", text: "keep me" }],
 		};
 		await plugin["command.execute.before"]!(
-			{ command: "other", arguments: "" } as any,
+			{ command: "other", sessionID: "ses_1", arguments: "" } as any,
 			output,
 		);
 		expect(output.parts[0].text).toBe("keep me");
+		expect(promptAsync).not.toHaveBeenCalled();
 	});
 
-	test("command.execute.before replaces all parts, including non-text ones", async () => {
+	test("command.execute.before empties all parts, including non-text ones", async () => {
+		const promptAsync = jest.fn(async () => ({}));
 		const plugin = await aliasPlugin({
-			client: makeClient({}),
+			client: makeClient({ promptAsync }),
 			directory: "/tmp/proj",
 		} as any);
 		const output: any = {
@@ -2110,67 +2163,124 @@ describe("plugin wiring", () => {
 			],
 		};
 		await plugin["command.execute.before"]!(
-			{ command: "alias", arguments: "list" } as any,
+			{ command: "alias", sessionID: "ses_1", arguments: "list" } as any,
 			output,
 		);
 		// /alias is a pure text command: every part — regardless of type — is
-		// replaced by the single text result.
-		expect(output.parts).toHaveLength(1);
-		expect(output.parts[0].type).toBe("text");
-		expect(output.parts[0].text).toBe(
-			"No aliases defined. Use 'alias set <key> <provider/model> [variant]' to add one.",
-		);
-		expect(output.parts[0].ignored).toBe(true);
+		// dropped from the command's user message; the reply goes out via the
+		// noReply prompt instead.
+		expect(output.parts).toHaveLength(0);
+		expect(promptAsync).toHaveBeenCalledTimes(1);
 	});
 
-	test("provider list error surfaces in set verification", async () => {
+	test("promptAsync failure falls back to an ignored empty part", async () => {
+		const promptAsync = jest.fn(async () => {
+			throw new Error("session gone");
+		});
 		const plugin = await aliasPlugin({
-			client: makeClient({ providerError: { code: 500 } }),
+			client: makeClient({ promptAsync }),
 			directory: "/tmp/proj",
 		} as any);
 		const output: any = { parts: [] };
 		await plugin["command.execute.before"]!(
-			{ command: "alias", arguments: "set cheap openai/gpt-4o-mini" } as any,
+			{ command: "alias", sessionID: "ses_1", arguments: "list" } as any,
 			output,
 		);
-		expect(output.parts[0].text).toMatch(/^Error: could not verify model/);
+		// The command's user message stays invisible to the model: a single
+		// ignored empty text part.
+		expect(output.parts).toHaveLength(1);
+		expect(output.parts[0]).toEqual({
+			type: "text",
+			text: "",
+			ignored: true,
+			synthetic: true,
+		});
+	});
+
+	test("provider list error surfaces in set verification", async () => {
+		const promptAsync = jest.fn(async () => ({}));
+		const plugin = await aliasPlugin({
+			client: makeClient({ providerError: { code: 500 }, promptAsync }),
+			directory: "/tmp/proj",
+		} as any);
+		const output: any = { parts: [] };
+		await plugin["command.execute.before"]!(
+			{ command: "alias", sessionID: "ses_1", arguments: "set cheap openai/gpt-4o-mini" } as any,
+			output,
+		);
+		expect(promptAsync).toHaveBeenCalledWith(
+			expect.objectContaining({
+				body: expect.objectContaining({
+					parts: [
+						expect.objectContaining({
+							text: expect.stringMatching(/^Error: could not verify model/),
+						}),
+					],
+				}),
+			}),
+		);
 	});
 
 	test("provider list unexpected shape surfaces in set verification", async () => {
+		const promptAsync = jest.fn(async () => ({}));
 		const plugin = await aliasPlugin({
 			client: {
 				provider: {
 					list: jest.fn(async () => ({ error: undefined, data: null })),
 				},
+				session: { promptAsync },
 			} as any,
 			directory: "/tmp/proj",
 		} as any);
 		const output: any = { parts: [] };
 		await plugin["command.execute.before"]!(
-			{ command: "alias", arguments: "set cheap openai/gpt-4o-mini" } as any,
+			{ command: "alias", sessionID: "ses_1", arguments: "set cheap openai/gpt-4o-mini" } as any,
 			output,
 		);
-		expect(output.parts[0].text).toMatch(/^Error: could not verify model/);
+		expect(promptAsync).toHaveBeenCalledWith(
+			expect.objectContaining({
+				body: expect.objectContaining({
+					parts: [
+						expect.objectContaining({
+							text: expect.stringMatching(/^Error: could not verify model/),
+						}),
+					],
+				}),
+			}),
+		);
 	});
 
 	test("provider list with non-array data.all surfaces in set verification", async () => {
+		const promptAsync = jest.fn(async () => ({}));
 		const plugin = await aliasPlugin({
 			client: {
 				provider: {
 					list: jest.fn(async () => ({ error: undefined, data: {} })),
 				},
+				session: { promptAsync },
 			} as any,
 			directory: "/tmp/proj",
 		} as any);
 		const output: any = { parts: [] };
 		await plugin["command.execute.before"]!(
-			{ command: "alias", arguments: "set cheap openai/gpt-4o-mini" } as any,
+			{ command: "alias", sessionID: "ses_1", arguments: "set cheap openai/gpt-4o-mini" } as any,
 			output,
 		);
-		expect(output.parts[0].text).toMatch(/^Error: could not verify model/);
+		expect(promptAsync).toHaveBeenCalledWith(
+			expect.objectContaining({
+				body: expect.objectContaining({
+					parts: [
+						expect.objectContaining({
+							text: expect.stringMatching(/^Error: could not verify model/),
+						}),
+					],
+				}),
+			}),
+		);
 	});
 
 	test("set through the plugin fetches the provider list and succeeds", async () => {
+		const promptAsync = jest.fn(async () => ({}));
 		const plugin = await aliasPlugin({
 			client: makeClient({
 				providerList: [
@@ -2179,15 +2289,26 @@ describe("plugin wiring", () => {
 						models: [{ id: "gpt-4o-mini" }],
 					},
 				],
+				promptAsync,
 			}),
 			directory: "/tmp/proj",
 		} as any);
 		const output: any = { parts: [] };
 		await plugin["command.execute.before"]!(
-			{ command: "alias", arguments: "set cheap openai/gpt-4o-mini" } as any,
+			{ command: "alias", sessionID: "ses_1", arguments: "set cheap openai/gpt-4o-mini" } as any,
 			output,
 		);
-		expect(output.parts[0].text).toContain("Alias 'cheap' set");
+		expect(promptAsync).toHaveBeenCalledWith(
+			expect.objectContaining({
+				body: expect.objectContaining({
+					parts: [
+						expect.objectContaining({
+							text: expect.stringContaining("Alias 'cheap' set"),
+						}),
+					],
+				}),
+			}),
+		);
 		expect(readAliases()).toEqual({
 			cheap: { model: "openai/gpt-4o-mini" },
 		});
@@ -2197,6 +2318,7 @@ describe("plugin wiring", () => {
 		// Real SDK payloads carry provider-level extras (name, config, ...) and
 		// model entries with extras; depending on SDK version, models may be a
 		// record keyed by model id rather than an array.
+		const promptAsync = jest.fn(async () => ({}));
 		const plugin = await aliasPlugin({
 			client: makeClient({
 				providerList: [
@@ -2214,6 +2336,7 @@ describe("plugin wiring", () => {
 						},
 					},
 				],
+				promptAsync,
 			}),
 			directory: "/tmp/proj",
 		} as any);
@@ -2221,11 +2344,22 @@ describe("plugin wiring", () => {
 		await plugin["command.execute.before"]!(
 			{
 				command: "alias",
+				sessionID: "ses_1",
 				arguments: "set smart ollama-cloud/glm-5.3-flash max",
 			} as any,
 			output,
 		);
-		expect(output.parts[0].text).toContain("Alias 'smart' set");
+		expect(promptAsync).toHaveBeenCalledWith(
+			expect.objectContaining({
+				body: expect.objectContaining({
+					parts: [
+						expect.objectContaining({
+							text: expect.stringContaining("Alias 'smart' set"),
+						}),
+					],
+				}),
+			}),
+		);
 		expect(readAliases()).toEqual({
 			smart: { model: "ollama-cloud/glm-5.3-flash", variant: "max" },
 		});

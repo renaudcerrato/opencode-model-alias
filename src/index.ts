@@ -694,12 +694,38 @@ export const aliasPlugin: Plugin = async ({ client, directory }) => {
 				} catch (error) {
 					result = `Error: ${error instanceof Error ? error.message : "alias command failed"}`;
 				}
-				const part = {
-					type: "text",
-					text: result,
-					ignored: true,
-				} as Part;
-				output.parts.splice(0, output.parts.length, part);
+				// OpenCode always runs the agent loop after a command executes;
+				// `ignored` only filters LLM context, it cannot suppress the
+				// turn. So: empty the command's own parts (a zero-part user
+				// message is skipped by the model entirely) and self-submit the
+				// reply as a noReply prompt — the pattern OpenCode's own TUI
+				// uses for LLM-silent session messages.
+				output.parts.splice(0, output.parts.length);
+				try {
+					await client.session.promptAsync({
+						path: { id: input.sessionID },
+						body: {
+							noReply: true,
+							parts: [
+								{
+									type: "text",
+									text: result,
+									synthetic: true,
+								},
+							],
+						},
+					});
+				} catch {
+					// The reply could not be added to the session (e.g. the
+					// session is gone). Fall back to an ignored empty part so
+					// the command's user message stays invisible to the model.
+					output.parts.push({
+						type: "text",
+						text: "",
+						ignored: true,
+						synthetic: true,
+					} as Part);
+				}
 			}
 		},
 	};
