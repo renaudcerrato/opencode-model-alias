@@ -9,9 +9,25 @@
 
 > **Note:** This project is not built by the OpenCode team and is not affiliated with OpenCode in any way.
 
-[OpenCode](https://opencode.ai) plugin that allows users to define model aliases for consistent use across machines — with support for **model variants**, **alias chains**, and **fail-closed validation**.
+[OpenCode](https://opencode.ai) plugin that lets you define model aliases for consistent use across machines — with support for **model variants** and **alias chains**.
 
-> **Fork notice:** This is a hardened fork of [mattaschmann/opencode-model-alias](https://github.com/mattaschmann/opencode-model-alias). All credit for the original idea and implementation goes to [Matt Aschmann](https://github.com/mattaschmann); see [Credits](#creditsinspirations). This fork adds model-variant presets, recursive alias chains with cycle/depth protection, fail-closed error handling, atomic writes, and config-directory detection.
+> **Fork notice:** This is a fork of [mattaschmann/opencode-model-alias](https://github.com/mattaschmann/opencode-model-alias). All credit for the original idea and implementation goes to [Matt Aschmann](https://github.com/mattaschmann); see [Credits](#creditsinspirations). This fork adds model variants and alias chains.
+
+> **Fork notice:** This is a fork of [mattaschmann/opencode-model-alias](https://github.com/mattaschmann/opencode-model-alias). All credit for the original idea and implementation goes to [Matt Aschmann](https://github.com/mattaschmann); see [Credits](#creditsinspirations). This fork adds model variants and alias chains.
+
+## Contents
+
+- [Installation](#installation)
+- [Why This Plugin?](#why-this-plugin)
+- [Usage](#usage)
+  - [The `/alias` Command](#the-alias-command)
+  - [Using Aliases](#using-aliases)
+  - [Alias Definitions](#alias-definitions)
+  - [Alias File Location](#alias-file-location)
+- [Development](#development)
+- [References](#references)
+- [Credit/Inspirations](#creditsinspirations)
+- [License](#license)
 
 ## Installation
 
@@ -93,9 +109,6 @@ Manage model aliases directly from OpenCode:
 # Delete an alias
 /alias delete cheap
 
-# Delete an alias that other aliases chain through (requires force)
-/alias delete intermediate force
-
 # Show help
 /alias help
 
@@ -147,7 +160,7 @@ Aliases live in `model-aliases.json` (see [Alias File Location](#alias-file-loca
 ```json
 {
   "cheap": "openai/gpt-4o-mini",
-  "contextscout": "cheap"
+  "reviewer": "cheap"
 }
 ```
 
@@ -165,58 +178,19 @@ Aliases live in `model-aliases.json` (see [Alias File Location](#alias-file-loca
 Rules:
 
 - The object form's `model` must be a **direct `provider/model` identifier** — it cannot reference another alias. Use the string form for alias-to-alias references.
-- The optional `variant` must be listed in the model's provider metadata; `/alias set` validates this and fails closed, listing the supported variants on rejection.
-- String alias chains inherit the variant of the nearest outer object-form entry in their resolution chain.
+- The optional `variant` must be listed in the model's provider metadata; `/alias set` validates this and rejects unsupported variants, listing the supported ones.
+- Setting an alias without a variant removes any previous variant (complete replacement).
+- String alias chains inherit the variant of the nearest object-form entry in their resolution chain.
 - An alias-provided variant **overrides** any variant configured on the agent or command.
 - Chains support up to 16 hops; cycles are rejected.
-- Deleting an alias that other aliases chain through is refused: the delete names the dependent aliases — delete those first, or bypass the check with `alias delete <key> force`.
+- Deleting an alias that other aliases chain through is refused — the error names the dependent aliases. Delete those first, or bypass the check with `alias delete <key> force`.
 - Alias keys **shadow model references**: an agent/command `model` matching an alias key is always resolved through it, even if it looks like a `provider/model` identifier. Avoid naming aliases after real model ids.
-
-### The `set` Command with Variants
-
-```bash
-# Set an alias with a variant (object form is written)
-/alias set smart ollama-cloud/glm-5.3-flash max
-
-# Setting without a variant removes any previous variant (complete replacement)
-/alias set smart ollama-cloud/glm-5.3-flash
-
-# Variants cannot be combined with alias targets
-/alias set reviewer smart max
-# Error: variant 'max' cannot be applied to alias target 'smart'
-```
-
-An unsupported variant is rejected with the list of supported ones:
-
-```
-Error: variant 'turbo' is not listed for model 'ollama-cloud/glm-5.3-flash'. Supported variants: low, max.
-```
-
-### Deleting Aliases Safely
-
-Deleting an alias that other aliases chain through is refused, so a chain is never silently broken:
-
-```
-/alias delete intermediate
-# Error: alias 'intermediate' is referenced by other aliases: source. Delete those first, or use 'alias delete intermediate force'.
-```
-
-Delete the dependents first, or bypass the check with `force` (which leaves any dependent alias `[unresolved]`):
-
-```
-/alias delete intermediate force
-# Alias 'intermediate' deleted. Please restart OpenCode for the change to take effect.
-```
 
 ### Alias File Location
 
-The alias file is resolved the same way OpenCode resolves its own global config directory:
+The alias file lives next to your OpenCode config — `~/.config/opencode/model-aliases.json` by default, or in the directory set by `OPENCODE_CONFIG_DIR` / `XDG_CONFIG_HOME`, matching how OpenCode resolves its own global config.
 
-1. `OPENCODE_CONFIG_DIR` environment variable (used as the config directory itself), if set
-2. `$XDG_CONFIG_HOME/opencode`, if `XDG_CONFIG_HOME` is set
-3. `~/.config/opencode` (default)
-
-The plugin reads `model-aliases.json` from that directory. It does **not** create the file or directory implicitly — the file is only written when you set or delete an alias via `/alias`.
+The plugin does **not** create the file or directory implicitly — the file is only written when you set or delete an alias via `/alias`.
 
 Example `model-aliases.json`:
 
@@ -233,35 +207,18 @@ Example `model-aliases.json`:
     "model": "ollama-cloud/glm-5.3-flash",
     "variant": "max"
   },
-  "contextscout": "cheap",
-  "externalscout": "cheap"
+  "reviewer": "cheap",
+  "researcher": "cheap"
 }
 ```
-
-### Fail-Closed Behavior
-
-The plugin never guesses:
-
-- An unreadable or invalid alias file produces an explicit `Error: ...` for `/alias` commands; nothing is written.
-- A leading UTF-8 BOM is tolerated (Windows editors and PowerShell emit one), and a zero-byte or whitespace-only file is treated as "no aliases yet".
-- Malformed alias definitions (missing `model`, non-string or whitespace-only `variant`, unknown fields, object-form entries pointing at other aliases or at malformed model ids) are rejected.
-- `/alias set` verifies targets against the provider list and validates variants against provider metadata before writing. An empty provider list (nothing authenticated) also fails closed.
-- Writes are atomic (temp file + rename, owner-only permissions) with a concurrent-modification check on both `set` and `delete`.
-- Deleting an alias referenced by other aliases is refused unless `force` is given, so chains are never silently broken.
-- At startup, an unreadable alias file is tolerated (aliases are simply not applied) so a broken file never prevents OpenCode from launching.
 
 ## Development
 
 ```sh
 npm install
-npm test        # jest with coverage; fails below the 100% threshold
+npm test        # jest with coverage
 npm run typecheck
 ```
-
-Coverage is enforced at **100%** (statements, branches, functions, lines) via
-`coverageThreshold` in `jest.config.cjs` — a regression fails the test run.
-The README badges are regenerated by CI (`istanbul-badges-readme`) after each
-push to `main`.
 
 ## References
 

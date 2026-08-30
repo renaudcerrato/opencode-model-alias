@@ -141,8 +141,8 @@ const README_ALIAS_FILE = {
 	cheap: { model: "openai/gpt-5.6-luna", variant: "max" },
 	genius: { model: "openai/gpt-5.6-sol" },
 	smart: { model: "ollama-cloud/glm-5.3-flash", variant: "max" },
-	contextscout: "cheap",
-	externalscout: "cheap",
+	reviewer: "cheap",
+	researcher: "cheap",
 };
 
 function writeReadmeAliasFile(): void {
@@ -1605,13 +1605,13 @@ describe("handleAliasCommand", () => {
 			'{"source": "intermediate", "intermediate": "openai/gpt-4o-mini"}';
 		await handleAliasCommand("delete intermediate force", fetchProvidersOk);
 		const config: any = {
-			agent: { scout: { model: "source" } },
+			agent: { dependent: { model: "source" } },
 		};
 		resolveConfigAliases(config);
 		// The chain terminates at the now-missing 'intermediate' key, which is
 		// not a provider/model identifier — resolution rewrites the model to
 		// that literal. Pin this documented fail-open-at-terminal behavior.
-		expect(config.agent.scout.model).toBe("intermediate");
+		expect(config.agent.dependent.model).toBe("intermediate");
 	});
 
 	test("delete - names all transitive dependents in the refusal", async () => {
@@ -2362,8 +2362,8 @@ describe("realistic alias file", () => {
 		// Second object entry with variant.
 		expect(lines).toContain("  smart → ollama-cloud/glm-5.3-flash [max]");
 		// String aliases chaining into an object entry inherit its variant.
-		expect(lines).toContain("  contextscout → cheap → openai/gpt-5.6-luna [max]");
-		expect(lines).toContain("  externalscout → cheap → openai/gpt-5.6-luna [max]");
+		expect(lines).toContain("  reviewer → cheap → openai/gpt-5.6-luna [max]");
+		expect(lines).toContain("  researcher → cheap → openai/gpt-5.6-luna [max]");
 		// No false status markers anywhere.
 		expect(result).not.toContain("[unresolved]");
 		expect(result).not.toContain("[cycle]");
@@ -2376,10 +2376,10 @@ describe("realistic alias file", () => {
 			agent: {
 				budget: { model: "cheap" },
 				geniusAgent: { model: "genius" },
-				scout: { model: "contextscout" },
+				reviewAgent: { model: "reviewer" },
 			},
 			command: {
-				external: { model: "externalscout" },
+				research: { model: "researcher" },
 			},
 		};
 		resolveConfigAliases(config);
@@ -2387,10 +2387,10 @@ describe("realistic alias file", () => {
 		expect(config.agent.budget.variant).toBe("max");
 		expect(config.agent.geniusAgent.model).toBe("openai/gpt-5.6-sol");
 		expect(config.agent.geniusAgent.variant).toBeUndefined();
-		expect(config.agent.scout.model).toBe("openai/gpt-5.6-luna");
-		expect(config.agent.scout.variant).toBe("max");
-		expect(config.command.external.model).toBe("openai/gpt-5.6-luna");
-		expect(config.command.external.variant).toBe("max");
+		expect(config.agent.reviewAgent.model).toBe("openai/gpt-5.6-luna");
+		expect(config.agent.reviewAgent.variant).toBe("max");
+		expect(config.command.research.model).toBe("openai/gpt-5.6-luna");
+		expect(config.command.research.variant).toBe("max");
 	});
 });
 
