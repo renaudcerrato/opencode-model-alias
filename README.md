@@ -7,13 +7,9 @@
 ![Functions](https://img.shields.io/badge/functions-100%25-brightgreen.svg?style=flat)
 ![Lines](https://img.shields.io/badge/lines-100%25-brightgreen.svg?style=flat)
 
-> **Note:** This project is not built by the OpenCode team and is not affiliated with OpenCode in any way.
-
 [OpenCode](https://opencode.ai) plugin that lets you define model aliases for consistent use across machines — with support for **model variants** and **alias chains**.
 
-> **Fork notice:** This is a fork of [mattaschmann/opencode-model-alias](https://github.com/mattaschmann/opencode-model-alias). All credit for the original idea and implementation goes to [Matt Aschmann](https://github.com/mattaschmann); see [Credits](#creditsinspirations). This fork adds model variants and alias chains.
-
-> **Fork notice:** This is a fork of [mattaschmann/opencode-model-alias](https://github.com/mattaschmann/opencode-model-alias). All credit for the original idea and implementation goes to [Matt Aschmann](https://github.com/mattaschmann); see [Credits](#creditsinspirations). This fork adds model variants and alias chains.
+> **Note:** This is a fork of [mattaschmann/opencode-model-alias](https://github.com/mattaschmann/opencode-model-alias) — all credit for the original idea and implementation goes to [Matt Aschmann](https://github.com/mattaschmann) (see [Credits](#creditsinspirations)). Not built by the OpenCode team and not affiliated with OpenCode in any way.
 
 ## Contents
 
@@ -111,9 +107,6 @@ Manage model aliases directly from OpenCode:
 
 # Show help
 /alias help
-
-# Show available models in correct format
-!opencode models
 ```
 
 Tip: type `!opencode models` in the TUI to list the currently available models in the correct provider/model format.
