@@ -19,6 +19,7 @@
   - [The `/alias` Command](#the-alias-command)
   - [Using Aliases](#using-aliases)
   - [Alias Definitions](#alias-definitions)
+  - [Alias Chains](#alias-chains)
   - [Alias File Location](#alias-file-location)
 - [Development](#development)
 - [References](#references)
@@ -85,6 +86,8 @@ With model aliases, you can use a consistent identifier across machines:
    ```
 
 Now your command configuration is portable, and each computer maps "cheap" to whatever model that machine prefers.
+
+Aliases can also **chain** — an alias pointing at another alias — so you can define stable role names (like `reviewer`) on top of machine-specific model mappings (see [Alias Chains](#alias-chains)).
 
 ## Usage
 
@@ -178,6 +181,32 @@ Rules:
 - Chains support up to 16 hops; cycles are rejected.
 - Deleting an alias that other aliases chain through is refused — the error names the dependent aliases. Delete those first, or bypass the check with `alias delete <key> force`.
 - Alias keys **shadow model references**: an agent/command `model` matching an alias key is always resolved through it, even if it looks like a `provider/model` identifier. Avoid naming aliases after real model ids.
+
+### Alias Chains
+
+A string alias can point at **another alias** instead of a model. When OpenCode resolves a model reference, it follows the chain until it reaches a real model — so you can layer aliases on top of each other:
+
+```json
+{
+  "cheap": {
+    "model": "openai/gpt-5.6-luna",
+    "variant": "max"
+  },
+  "reviewer": "cheap",
+  "researcher": "cheap"
+}
+```
+
+Here `reviewer` and `researcher` both resolve to `openai/gpt-5.6-luna` with variant `max`:
+
+```
+reviewer → cheap → openai/gpt-5.6-luna [max]
+researcher → cheap → openai/gpt-5.6-luna [max]
+```
+
+This is the portability story one level deeper: `cheap` is the machine-specific mapping, while `reviewer` and `researcher` are stable role names your agents and commands use. Switch this machine to a different model by changing **one line** — every role alias follows. `/alias list` shows the full chain for each alias, including the inherited variant.
+
+Chains can be several hops deep (`a → b → c → provider/model`), which is handy for progressive refinement — e.g. a generic `fast` alias, a team-level `reviewer → fast`, and a personal override on top. Two guardrails keep chains sane: resolution stops after **16 hops**, and **cycles are rejected**. Deleting an alias that others chain through is refused (see the rules above) so a chain is never silently broken.
 
 ### Alias File Location
 
