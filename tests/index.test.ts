@@ -1995,7 +1995,7 @@ describe("plugin wiring", () => {
 		Object.keys(mockFs).forEach((key) => delete mockFs[key]);
 	});
 
-	test("config hook registers /alias command and resolves aliases", async () => {
+	test("config hook registers /alias command with tool-call template and resolves aliases", async () => {
 		mockFs[ALIAS_FILE] = '{"cheap": "openai/gpt-4o-mini"}';
 		const plugin = await aliasPlugin({
 			client: makeClient({}),
@@ -2005,10 +2005,8 @@ describe("plugin wiring", () => {
 			agent: { myagent: { model: "cheap" } },
 		};
 		await plugin.config(config);
-		expect(config.command.alias).toEqual({
-			template: "",
-			description: expect.any(String),
-		});
+		expect(config.command.alias.template).toContain("$ARGUMENTS");
+		expect(config.command.alias.template).toContain("alias tools");
 		expect(config.agent.myagent.model).toBe("openai/gpt-4o-mini");
 	});
 
@@ -2030,87 +2028,131 @@ describe("plugin wiring", () => {
 		});
 	});
 
-	test("command.execute.before catches handler errors and reports them", async () => {
+	test("plugin registers the three alias tools", async () => {
 		const plugin = await aliasPlugin({
 			client: makeClient({}),
 			directory: "/tmp/proj",
 		} as any);
-		const output: any = { parts: [] };
-		// arguments: undefined makes args.trim() throw inside the handler.
-		await plugin["command.execute.before"]!(
-			{ command: "alias", arguments: undefined } as any,
-			output,
-		);
-		expect(output.parts).toHaveLength(1);
-		expect(output.parts[0].text).toMatch(/^Error:/);
-		expect(output.parts[0].ignored).toBe(true);
+		expect(Object.keys(plugin.tool!).sort()).toEqual([
+			"alias-delete",
+			"alias-list",
+			"alias-set",
+		]);
+		// Each tool exposes a description and an execute function.
+		for (const name of Object.keys(plugin.tool!)) {
+			expect(typeof plugin.tool![name].description).toBe("string");
+			expect(typeof plugin.tool![name].execute).toBe("function");
+		}
 	});
 
-	test("command.execute.before catches non-Error throws", async () => {
+	test("alias-list tool lists aliases", async () => {
+		mockFs[ALIAS_FILE] = '{"cheap": "openai/gpt-4o-mini"}';
 		const plugin = await aliasPlugin({
 			client: makeClient({}),
 			directory: "/tmp/proj",
 		} as any);
-		const output: any = { parts: [] };
-		// arguments: undefined makes args.trim() throw a TypeError (an Error),
-		// so stub the command handler input to throw a non-Error instead.
-		await plugin["command.execute.before"]!(
-			{ command: "alias", get arguments() { throw "boom"; } } as any,
-			output,
-		);
-		expect(output.parts).toHaveLength(1);
-		expect(output.parts[0].text).toBe("Error: alias command failed");
-		expect(output.parts[0].ignored).toBe(true);
+		const result = await plugin.tool!["alias-list"].execute({}, {} as any);
+		expect(result).toBe("Model aliases:\n  cheap → openai/gpt-4o-mini");
 	});
 
-	test("command.execute.before intercepts alias command", async () => {
+	test("alias-set tool writes the alias", async () => {
+		const plugin = await aliasPlugin({
+			client: makeClient({
+				providerList: [{ id: "openai", models: [{ id: "gpt-4o-mini" }] }],
+			}),
+			directory: "/tmp/proj",
+		} as any);
+		const result = (await plugin.tool!["alias-set"].execute(
+			{ key: "cheap", value: "openai/gpt-4o-mini" },
+			{} as any,
+		)) as string;
+		expect(result).toContain("Alias 'cheap' set");
+		expect(readAliases()).toEqual({
+			cheap: { model: "openai/gpt-4o-mini" },
+		});
+	});
+
+	test("alias-set tool with variant writes object form", async () => {
+		const plugin = await aliasPlugin({
+			client: makeClient({
+				providerList: [
+					{
+						id: "ollama-cloud",
+						models: [{ id: "glm-5.3-flash", variants: { max: {} } }],
+					},
+				],
+			}),
+			directory: "/tmp/proj",
+		} as any);
+		const result = (await plugin.tool!["alias-set"].execute(
+			{ key: "smart", value: "ollama-cloud/glm-5.3-flash", variant: "max" },
+			{} as any,
+		)) as string;
+		expect(result).toContain("(variant: max)");
+		expect(readAliases()).toEqual({
+			smart: { model: "ollama-cloud/glm-5.3-flash", variant: "max" },
+		});
+	});
+
+	test("alias-set tool surfaces validation errors", async () => {
+		const plugin = await aliasPlugin({
+			client: makeClient({ providerList: [] }),
+			directory: "/tmp/proj",
+		} as any);
+		const result = (await plugin.tool!["alias-set"].execute(
+			{ key: "cheap", value: "openai/gpt-4o-mini" },
+			{} as any,
+		)) as string;
+		expect(result).toMatch(/not available from a known provider/);
+	});
+
+	test("alias-delete tool deletes the alias", async () => {
+		mockFs[ALIAS_FILE] =
+			'{"cheap": "openai/gpt-4o-mini", "other": "openai/gpt-4o"}';
 		const plugin = await aliasPlugin({
 			client: makeClient({}),
 			directory: "/tmp/proj",
 		} as any);
-		const output: any = {
-			parts: [{ type: "text", text: "original" }],
-		};
-		await plugin["command.execute.before"]!(
-			{ command: "alias", arguments: "list" } as any,
-			output,
-		);
-		expect(output.parts).toHaveLength(1);
-		expect(output.parts[0].text).toBe(
-			"No aliases defined. Use 'alias set <key> <provider/model> [variant]' to add one.",
-		);
-		expect(output.parts[0].ignored).toBe(true);
+		const result = (await plugin.tool!["alias-delete"].execute(
+			{ key: "cheap" },
+			{} as any,
+		)) as string;
+		expect(result).toContain("Alias 'cheap' deleted");
+		expect(readAliases()).toEqual({ other: { model: "openai/gpt-4o" } });
 	});
 
-	test("command.execute.before ignores other commands", async () => {
+	test("alias-delete tool refuses to break chains unless forced", async () => {
+		mockFs[ALIAS_FILE] =
+			'{"source": "intermediate", "intermediate": "openai/gpt-4o-mini"}';
 		const plugin = await aliasPlugin({
 			client: makeClient({}),
 			directory: "/tmp/proj",
 		} as any);
-		const output: any = {
-			parts: [{ type: "text", text: "keep me" }],
-		};
-		await plugin["command.execute.before"]!(
-			{ command: "other", arguments: "" } as any,
-			output,
-		);
-		expect(output.parts[0].text).toBe("keep me");
+		const refused = (await plugin.tool!["alias-delete"].execute(
+			{ key: "intermediate" },
+			{} as any,
+		)) as string;
+		expect(refused).toMatch(/referenced by other aliases/);
+		const forced = (await plugin.tool!["alias-delete"].execute(
+			{ key: "intermediate", force: true },
+			{} as any,
+		)) as string;
+		expect(forced).toContain("Alias 'intermediate' deleted");
 	});
 
-	test("provider list error surfaces in set verification", async () => {
+	test("provider list error surfaces in alias-set tool output", async () => {
 		const plugin = await aliasPlugin({
 			client: makeClient({ providerError: { code: 500 } }),
 			directory: "/tmp/proj",
 		} as any);
-		const output: any = { parts: [] };
-		await plugin["command.execute.before"]!(
-			{ command: "alias", arguments: "set cheap openai/gpt-4o-mini" } as any,
-			output,
-		);
-		expect(output.parts[0].text).toMatch(/^Error: could not verify model/);
+		const result = (await plugin.tool!["alias-set"].execute(
+			{ key: "cheap", value: "openai/gpt-4o-mini" },
+			{} as any,
+		)) as string;
+		expect(result).toMatch(/^Error: could not verify model/);
 	});
 
-	test("provider list unexpected shape surfaces in set verification", async () => {
+	test("provider list unexpected shape surfaces in alias-set tool output", async () => {
 		const plugin = await aliasPlugin({
 			client: {
 				provider: {
@@ -2119,15 +2161,14 @@ describe("plugin wiring", () => {
 			} as any,
 			directory: "/tmp/proj",
 		} as any);
-		const output: any = { parts: [] };
-		await plugin["command.execute.before"]!(
-			{ command: "alias", arguments: "set cheap openai/gpt-4o-mini" } as any,
-			output,
-		);
-		expect(output.parts[0].text).toMatch(/^Error: could not verify model/);
+		const result = (await plugin.tool!["alias-set"].execute(
+			{ key: "cheap", value: "openai/gpt-4o-mini" },
+			{} as any,
+		)) as string;
+		expect(result).toMatch(/^Error: could not verify model/);
 	});
 
-	test("provider list with non-array data.all surfaces in set verification", async () => {
+	test("provider list with non-array data.all surfaces in alias-set tool output", async () => {
 		const plugin = await aliasPlugin({
 			client: {
 				provider: {
@@ -2136,41 +2177,14 @@ describe("plugin wiring", () => {
 			} as any,
 			directory: "/tmp/proj",
 		} as any);
-		const output: any = { parts: [] };
-		await plugin["command.execute.before"]!(
-			{ command: "alias", arguments: "set cheap openai/gpt-4o-mini" } as any,
-			output,
-		);
-		expect(output.parts[0].text).toMatch(/^Error: could not verify model/);
+		const result = (await plugin.tool!["alias-set"].execute(
+			{ key: "cheap", value: "openai/gpt-4o-mini" },
+			{} as any,
+		)) as string;
+		expect(result).toMatch(/^Error: could not verify model/);
 	});
 
-	test("set through the plugin fetches the provider list and succeeds", async () => {
-		const plugin = await aliasPlugin({
-			client: makeClient({
-				providerList: [
-					{
-						id: "openai",
-						models: [{ id: "gpt-4o-mini" }],
-					},
-				],
-			}),
-			directory: "/tmp/proj",
-		} as any);
-		const output: any = { parts: [] };
-		await plugin["command.execute.before"]!(
-			{ command: "alias", arguments: "set cheap openai/gpt-4o-mini" } as any,
-			output,
-		);
-		expect(output.parts[0].text).toContain("Alias 'cheap' set");
-		expect(readAliases()).toEqual({
-			cheap: { model: "openai/gpt-4o-mini" },
-		});
-	});
-
-	test("set verifies against a realistic provider payload with extra fields and record-keyed models", async () => {
-		// Real SDK payloads carry provider-level extras (name, config, ...) and
-		// model entries with extras; depending on SDK version, models may be a
-		// record keyed by model id rather than an array.
+	test("alias-set tool verifies against a realistic provider payload with extra fields and record-keyed models", async () => {
 		const plugin = await aliasPlugin({
 			client: makeClient({
 				providerList: [
@@ -2191,15 +2205,11 @@ describe("plugin wiring", () => {
 			}),
 			directory: "/tmp/proj",
 		} as any);
-		const output: any = { parts: [] };
-		await plugin["command.execute.before"]!(
-			{
-				command: "alias",
-				arguments: "set smart ollama-cloud/glm-5.3-flash max",
-			} as any,
-			output,
-		);
-		expect(output.parts[0].text).toContain("Alias 'smart' set");
+		const result = (await plugin.tool!["alias-set"].execute(
+			{ key: "smart", value: "ollama-cloud/glm-5.3-flash", variant: "max" },
+			{} as any,
+		)) as string;
+		expect(result).toContain("Alias 'smart' set");
 		expect(readAliases()).toEqual({
 			smart: { model: "ollama-cloud/glm-5.3-flash", variant: "max" },
 		});

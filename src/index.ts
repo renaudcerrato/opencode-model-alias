@@ -38,8 +38,9 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { z } from "zod";
+import { tool } from "@opencode-ai/plugin";
 import type { Config, Plugin, PluginModule } from "@opencode-ai/plugin";
-import type { Part } from "@opencode-ai/sdk";
 
 // Mirror opencode's own global-config resolution (packages/core/src/global.ts):
 //   1. OPENCODE_CONFIG_DIR env var, if set
@@ -475,22 +476,12 @@ function aliasList(): string {
 	return `Model aliases:\n${lines}`;
 }
 
-async function aliasSet(
-	parts: string[],
+async function aliasSetOp(
+	key: string,
+	value: string,
+	variant: string | undefined,
 	fetchProviders: FetchProviders,
 ): Promise<string> {
-	const key = parts[1];
-	const value = parts[2];
-	const variant = parts[3];
-	if (!key) {
-		return "Error: key is required for 'set' subcommand";
-	}
-	if (!value) {
-		return "Error: value is required for 'set' subcommand";
-	}
-	if (parts.length > 4) {
-		return "Error: too many arguments. Use 'alias set <key> <provider/model> [variant]'";
-	}
 	let aliases: AliasMap;
 	try {
 		aliases = readAliases();
@@ -569,18 +560,7 @@ async function aliasSet(
 	return `Alias '${key}' set to '${value}'${suffix}. Please restart OpenCode for the change to take effect.`;
 }
 
-function aliasDelete(parts: string[]): string {
-	const key = parts[1];
-	if (!key) {
-		return "Error: key is required for 'delete' subcommand";
-	}
-	if (parts.length > 3) {
-		return "Error: too many arguments. Use 'alias delete <key> [force]'";
-	}
-	if (parts.length === 3 && parts[2] !== "force") {
-		return `Error: unexpected argument '${parts[2]}'. Use 'alias delete <key> [force]'`;
-	}
-	const force = parts[2] === "force";
+function aliasDeleteOp(key: string, force: boolean): string {
 	let aliases: AliasMap;
 	try {
 		aliases = readAliases();
@@ -639,10 +619,28 @@ async function handleAliasCommand(
 		return aliasList();
 	}
 	if (subcommand === "set") {
-		return aliasSet(parts, fetchProviders);
+		if (!parts[1]) {
+			return "Error: key is required for 'set' subcommand";
+		}
+		if (!parts[2]) {
+			return "Error: value is required for 'set' subcommand";
+		}
+		if (parts.length > 4) {
+			return "Error: too many arguments. Use 'alias set <key> <provider/model> [variant]'";
+		}
+		return aliasSetOp(parts[1], parts[2], parts[3], fetchProviders);
 	}
 	if (subcommand === "delete") {
-		return aliasDelete(parts);
+		if (!parts[1]) {
+			return "Error: key is required for 'delete' subcommand";
+		}
+		if (parts.length > 3) {
+			return "Error: too many arguments. Use 'alias delete <key> [force]'";
+		}
+		if (parts.length === 3 && parts[2] !== "force") {
+			return `Error: unexpected argument '${parts[2]}'. Use 'alias delete <key> [force]'`;
+		}
+		return aliasDeleteOp(parts[1], parts[2] === "force");
 	}
 	return "Unknown subcommand. Use 'alias help' for usage information.";
 }
@@ -671,10 +669,14 @@ export const aliasPlugin: Plugin = async ({ client, directory }) => {
 			try {
 				opencodeConfig.command ??= {};
 				// Only register /alias if the user has not defined their own.
+				// The templates instruct the model to call the alias tools —
+				// the command itself carries no logic.
 				if (!Object.hasOwn(opencodeConfig.command, "alias")) {
 					opencodeConfig.command.alias = {
-						template: "",
-						description: "Manage model aliases (list, set, delete)",
+						template:
+							"Use the alias tools to handle this request. The subcommand and arguments are: $ARGUMENTS\nReport the tool output exactly. Do nothing else.",
+						description:
+							"Manage model aliases (list, set, delete) via the alias-list / alias-set / alias-delete tools",
 					};
 				}
 			} catch {
@@ -683,24 +685,47 @@ export const aliasPlugin: Plugin = async ({ client, directory }) => {
 
 			resolveConfigAliases(opencodeConfig);
 		},
-		"command.execute.before": async (input, output) => {
-			if (input.command === "alias") {
-				let result: string;
-				try {
-					result = await handleAliasCommand(
-						input.arguments,
-						fetchProviderList,
-					);
-				} catch (error) {
-					result = `Error: ${error instanceof Error ? error.message : "alias command failed"}`;
-				}
-				const part = {
-					type: "text",
-					text: result,
-					ignored: true,
-				} as Part;
-				output.parts.splice(0, output.parts.length, part);
-			}
+		tool: {
+			"alias-list": tool({
+				description:
+					"List all configured model aliases with their resolution chains and variants",
+				args: {},
+				execute: async () => aliasList(),
+			}),
+			"alias-set": tool({
+				description:
+					"Set a model alias to a provider/model identifier, optionally with a variant. Validates the model against the provider list before writing.",
+				args: {
+					key: z.string().describe("The alias name, e.g. 'cheap'"),
+					value: z
+						.string()
+						.describe(
+							"The target as a provider/model identifier, e.g. 'openai/gpt-4o-mini'",
+						),
+					variant: z
+						.string()
+						.optional()
+						.describe(
+							"Optional model variant, e.g. 'max'. Must be listed in the model's provider metadata.",
+						),
+				},
+				execute: async ({ key, value, variant }) =>
+					aliasSetOp(key, value, variant, fetchProviderList),
+			}),
+			"alias-delete": tool({
+				description:
+					"Delete a model alias. Refuses to delete an alias that other aliases chain through unless force is set.",
+				args: {
+					key: z.string().describe("The alias name to delete"),
+					force: z
+						.boolean()
+						.optional()
+						.describe(
+							"Bypass the dependent-alias check (leaves dependent aliases unresolved).",
+						),
+				},
+				execute: async ({ key, force }) => aliasDeleteOp(key, !!force),
+			}),
 		},
 	};
 };
