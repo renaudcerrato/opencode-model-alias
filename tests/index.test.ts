@@ -2030,7 +2030,30 @@ describe("plugin wiring", () => {
 		});
 	});
 
-	test("command.execute.before catches handler errors and reports them", async () => {
+	test("command.execute.before splices ignored output plus a synthetic anchor", async () => {
+		mockFs[ALIAS_FILE] = '{"cheap": "openai/gpt-4o-mini"}';
+		const plugin = await aliasPlugin({
+			client: makeClient({}),
+			directory: "/tmp/proj",
+		} as any);
+		const output: any = { parts: [] };
+		await plugin["command.execute.before"]!(
+			{ command: "alias", arguments: "list" } as any,
+			output,
+		);
+		expect(output.parts).toHaveLength(2);
+		// Part 1: the alias output, visible in chat, hidden from the model.
+		expect(output.parts[0].ignored).toBe(true);
+		expect(output.parts[0].text).toContain("cheap → openai/gpt-4o-mini");
+		// Part 2: the anchor — the model's only instruction for the forced
+		// turn, preventing re-emission of recent tool calls.
+		expect(output.parts[1].synthetic).toBe(true);
+		expect(output.parts[1].text).toContain('the user ran "/alias list"');
+		expect(output.parts[1].text).toContain("do not act on it");
+		expect(output.parts[1].text).toContain("Reply with a single short sentence");
+	});
+
+	test("command.execute.before wraps handler errors in the ignored part", async () => {
 		const plugin = await aliasPlugin({
 			client: makeClient({}),
 			directory: "/tmp/proj",
@@ -2041,45 +2064,27 @@ describe("plugin wiring", () => {
 			{ command: "alias", arguments: undefined } as any,
 			output,
 		);
-		expect(output.parts).toHaveLength(1);
+		expect(output.parts).toHaveLength(2);
 		expect(output.parts[0].text).toMatch(/^Error:/);
 		expect(output.parts[0].ignored).toBe(true);
+		expect(output.parts[1].synthetic).toBe(true);
 	});
 
-	test("command.execute.before catches non-Error throws", async () => {
+	test("command.execute.before wraps non-Error throws", async () => {
 		const plugin = await aliasPlugin({
 			client: makeClient({}),
 			directory: "/tmp/proj",
 		} as any);
 		const output: any = { parts: [] };
-		// arguments: undefined makes args.trim() throw a TypeError (an Error),
-		// so stub the command handler input to throw a non-Error instead.
 		await plugin["command.execute.before"]!(
 			{ command: "alias", get arguments() { throw "boom"; } } as any,
 			output,
 		);
-		expect(output.parts).toHaveLength(1);
+		expect(output.parts).toHaveLength(2);
 		expect(output.parts[0].text).toBe("Error: alias command failed");
-		expect(output.parts[0].ignored).toBe(true);
-	});
-
-	test("command.execute.before intercepts alias command", async () => {
-		const plugin = await aliasPlugin({
-			client: makeClient({}),
-			directory: "/tmp/proj",
-		} as any);
-		const output: any = {
-			parts: [{ type: "text", text: "original" }],
-		};
-		await plugin["command.execute.before"]!(
-			{ command: "alias", arguments: "list" } as any,
-			output,
-		);
-		expect(output.parts).toHaveLength(1);
-		expect(output.parts[0].text).toBe(
-			"No aliases defined. Use 'alias set <key> <provider/model> [variant]' to add one.",
-		);
-		expect(output.parts[0].ignored).toBe(true);
+		expect(output.parts[1].synthetic).toBe(true);
+		// The anchor still names the action (unknown here -> "help").
+		expect(output.parts[1].text).toContain('"/alias help"');
 	});
 
 	test("command.execute.before ignores other commands", async () => {
@@ -2097,7 +2102,7 @@ describe("plugin wiring", () => {
 		expect(output.parts[0].text).toBe("keep me");
 	});
 
-	test("provider list error surfaces in set verification", async () => {
+	test("provider list error surfaces in the ignored output part", async () => {
 		const plugin = await aliasPlugin({
 			client: makeClient({ providerError: { code: 500 } }),
 			directory: "/tmp/proj",
@@ -2108,9 +2113,10 @@ describe("plugin wiring", () => {
 			output,
 		);
 		expect(output.parts[0].text).toMatch(/^Error: could not verify model/);
+		expect(output.parts[0].ignored).toBe(true);
 	});
 
-	test("provider list unexpected shape surfaces in set verification", async () => {
+	test("provider list unexpected shape surfaces in the ignored output part", async () => {
 		const plugin = await aliasPlugin({
 			client: {
 				provider: {
@@ -2127,7 +2133,7 @@ describe("plugin wiring", () => {
 		expect(output.parts[0].text).toMatch(/^Error: could not verify model/);
 	});
 
-	test("provider list with non-array data.all surfaces in set verification", async () => {
+	test("provider list with non-array data.all surfaces in the ignored output part", async () => {
 		const plugin = await aliasPlugin({
 			client: {
 				provider: {
@@ -2144,15 +2150,10 @@ describe("plugin wiring", () => {
 		expect(output.parts[0].text).toMatch(/^Error: could not verify model/);
 	});
 
-	test("set through the plugin fetches the provider list and succeeds", async () => {
+	test("set through the plugin writes the alias (result in the ignored part)", async () => {
 		const plugin = await aliasPlugin({
 			client: makeClient({
-				providerList: [
-					{
-						id: "openai",
-						models: [{ id: "gpt-4o-mini" }],
-					},
-				],
+				providerList: [{ id: "openai", models: [{ id: "gpt-4o-mini" }] }],
 			}),
 			directory: "/tmp/proj",
 		} as any);
@@ -2168,9 +2169,6 @@ describe("plugin wiring", () => {
 	});
 
 	test("set verifies against a realistic provider payload with extra fields and record-keyed models", async () => {
-		// Real SDK payloads carry provider-level extras (name, config, ...) and
-		// model entries with extras; depending on SDK version, models may be a
-		// record keyed by model id rather than an array.
 		const plugin = await aliasPlugin({
 			client: makeClient({
 				providerList: [

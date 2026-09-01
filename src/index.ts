@@ -686,7 +686,9 @@ export const aliasPlugin: Plugin = async ({ client, directory }) => {
 		"command.execute.before": async (input, output) => {
 			if (input.command === "alias") {
 				let result: string;
+				let action = "help";
 				try {
+					action = (input.arguments ?? "").trim() || "help";
 					result = await handleAliasCommand(
 						input.arguments,
 						fetchProviderList,
@@ -694,12 +696,31 @@ export const aliasPlugin: Plugin = async ({ client, directory }) => {
 				} catch (error) {
 					result = `Error: ${error instanceof Error ? error.message : "alias command failed"}`;
 				}
-				const part = {
-					type: "text",
-					text: result,
-					ignored: true,
-				} as Part;
-				output.parts.splice(0, output.parts.length, part);
+				// The command pipeline always runs an agent turn after this
+				// hook (no noReply mechanism exists). Two parts, two jobs:
+				//
+				// 1. The alias output, marked ignored — visible to the user
+				//    in the chat, filtered from the model's context.
+				// 2. A synthetic anchor, visible to the model. Without it the
+				//    model receives an effectively empty user message plus
+				//    stale context, and some models respond to that vacuum
+				//    by re-emitting recent tool calls (redoing edits). The
+				//    anchor tells the model what the user did and what the
+				//    command produced, giving the turn a bounded, harmless
+				//    job: summarize the maintenance action in one line.
+				const parts = [
+					{
+						type: "text",
+						text: result,
+						ignored: true,
+					},
+					{
+						type: "text",
+						text: `(/alias maintenance command: the user ran "/alias ${action}". Its output is shown above for reference only — do not act on it and do not repeat previous work. Reply with a single short sentence confirming what the command did.)`,
+						synthetic: true,
+					},
+				] as Part[];
+				output.parts.splice(0, output.parts.length, ...parts);
 			}
 		},
 	};
