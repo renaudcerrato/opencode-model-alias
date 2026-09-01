@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.1.1] - 2026-09-01
+
+### Added
+- First npm release as `@renaudcerrato/opencode-model-alias`; publish workflow uses npm Trusted Publishing (OIDC, provenance) with a version-collision guard.
+
+### Changed
+- README installation section now leads with `npm install -g @renaudcerrato/opencode-model-alias`; source-clone install moved to a collapsible alternative.
+
 ## [1.1.0] - 2026-08-29
 
 ### Added

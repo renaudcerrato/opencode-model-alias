@@ -28,19 +28,38 @@
 
 ## Installation
 
-Clone the repo to a local workspace:
+Install from npm:
 
 ```sh
-git clone https://github.com/renaudcerrato/opencode-model-alias.git ~/workspace/opencode-model-alias
+npm install -g @renaudcerrato/opencode-model-alias
 ```
 
 Then add the plugin to your OpenCode config (`opencode.jsonc`):
 
 ```json
 {
+  "plugin": ["@renaudcerrato/opencode-model-alias"]
+}
+```
+
+<details>
+<summary>Alternative: install from source</summary>
+
+Clone the repo to a local workspace:
+
+```sh
+git clone https://github.com/renaudcerrato/opencode-model-alias.git ~/workspace/opencode-model-alias
+```
+
+Then reference the local path in your OpenCode config (`opencode.jsonc`):
+
+```json
+{
   "plugin": ["~/workspace/opencode-model-alias"]
 }
 ```
+
+</details>
 
 ## Why This Plugin?
 

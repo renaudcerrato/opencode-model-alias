@@ -1,16 +1,19 @@
 {
-  "name": "opencode-model-alias",
-  "version": "1.1.0",
-  "private": true,
+  "name": "@renaudcerrato/opencode-model-alias",
+  "version": "1.1.1",
   "description": "OpenCode plugin that allows users to define model aliases for consistent use across machines.",
   "main": "src/index.ts",
   "type": "module",
+  "files": [
+    "src",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
   "scripts": {
     "test": "jest --config jest.config.cjs --coverage",
     "typecheck": "tsc --noEmit"
   },
-  "author": "Matt Aschmann <matt.aschmann@gmail.com>",
-  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/renaudcerrato/opencode-model-alias.git"
@@ -21,6 +24,7 @@
     "model",
     "alias"
   ],
+  "license": "MIT",
   "devDependencies": {
     "@opencode-ai/plugin": "^1.17.7",
     "@types/jest": "^30.0.0",
