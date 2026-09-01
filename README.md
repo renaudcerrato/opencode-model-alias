@@ -31,16 +31,18 @@
 Install from npm:
 
 ```sh
-npm install -g @renaudcerrato/opencode-model-alias
+npm install -g @renaudcerrato/opencode-model-alias@1.1.2
 ```
 
-Then add the plugin to your OpenCode config (`opencode.jsonc`):
+Then add the plugin to your OpenCode config (`opencode.jsonc`), pinned to the same version:
 
 ```json
 {
-  "plugin": ["@renaudcerrato/opencode-model-alias"]
+  "plugin": ["@renaudcerrato/opencode-model-alias@1.1.2"]
 }
 ```
+
+> Pinning the version is recommended: OpenCode resolves plugin references on startup, and a pinned version guarantees the plugin behavior stays identical across machines until you choose to upgrade.
 
 <details>
 <summary>Alternative: install from source</summary>
