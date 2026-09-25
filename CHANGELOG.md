@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.0.0] - 2026-09-25
+
+### Added
+- OpenCode V2 support: bind multiple agents to the same alias through `plugins[].options.agents`. Agent models resolve to each machine's configured provider/model and optional variant without rewriting OpenCode config files.
+- `/alias list`, `set`, `delete`, and `help` commands for V2; the alias file format, chains, and variants are shared with V1.
+
+### Changed
+- V2 agents using aliases omit their `model` field and use plugin bindings instead. V2 does not resolve aliases in command model fields or the default model; V1 agent/command alias resolution remains available on OpenCode 1.18.29+.
+- V2 command feedback uses an agent turn and passes at most 1,200 characters of the command result. Restart OpenCode after updating aliases to apply them to agent definitions.
+
 ## [1.1.1] - 2026-09-01
 
 ### Added

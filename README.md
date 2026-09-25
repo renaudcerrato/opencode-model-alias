@@ -7,28 +7,39 @@
 ![Functions](https://img.shields.io/badge/functions-100%25-brightgreen.svg?style=flat)
 ![Lines](https://img.shields.io/badge/lines-100%25-brightgreen.svg?style=flat)
 
-[OpenCode](https://opencode.ai) plugin that lets you define model aliases for consistent use across machines — with support for **model variants**, **alias chains**, and both the V1 and V2 plugin APIs. Alias configuration differs between the two APIs.
+[OpenCode](https://opencode.ai) plugin for machine-specific model aliases. Multiple agents can share an alias, so changing its target in one place switches them together. Supports variants, alias chains, and OpenCode V1 and V2.
 
 > **Note:** This is a fork of [mattaschmann/opencode-model-alias](https://github.com/mattaschmann/opencode-model-alias) — all credit for the original idea and implementation goes to [Matt Aschmann](https://github.com/mattaschmann) (see [Credits](#creditinspirations)). Not built by the OpenCode team and not affiliated with OpenCode in any way.
 
-## Contents
-
-- [Installation](#installation)
-- [Why This Plugin?](#why-this-plugin)
-- [Usage](#usage)
-  - [V1 and V2 Compatibility](#v1-and-v2-compatibility)
-  - [The `/alias` Command](#the-alias-command)
-  - [Using Aliases](#using-aliases)
-  - [Alias Definitions](#alias-definitions)
-  - [Alias Chains](#alias-chains)
-  - [Alias File Location](#alias-file-location)
-  - [Migrate from V1 to V2](#migrate-from-v1-to-v2)
-- [Development](#development)
-- [References](#references)
-- [Credit/Inspirations](#creditinspirations)
-- [License](#license)
-
 ## Installation
+
+### OpenCode V2
+
+Install the published plugin globally:
+
+```sh
+opencode plugin add @renaudcerrato/opencode-model-alias@2.0.0
+```
+
+To bind agents to aliases, replace the plugin entry added by the CLI in your global `~/.config/opencode/opencode.jsonc` with the object form below. Merge these fields into your existing config rather than replacing unrelated settings:
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": [{
+    "package": "@renaudcerrato/opencode-model-alias@2.0.0",
+    "options": { "agents": { "reviewer": "cheap", "planner": "cheap" } }
+  }],
+  "agents": {
+    "reviewer": { "description": "Reviews changes", "system": "Review the work." },
+    "planner": { "description": "Plans work", "system": "Plan the work." }
+  }
+}
+```
+
+Define `cheap` in your [local alias file](#alias-file-location) and restart OpenCode. Keep only one entry for this plugin: `opencode plugin add` registers the package but does not supply its `options.agents` bindings.
+
+### OpenCode V1
 
 For OpenCode V1 (1.18.29 or later), add the plugin to your OpenCode config (`opencode.jsonc`), pinned to a version:
 
@@ -59,87 +70,13 @@ Then reference the local path in your OpenCode config (`opencode.jsonc`):
 
 </details>
 
-## Why This Plugin?
-
-When you share OpenCode agents or commands across computers, the model available on one machine may not be available on another. A stable alias lets each machine choose its own provider/model target.
-
-### The Problem
-
-For example, a V1 custom command can specify a machine-specific model directly:
-
-```json
-{
-  "command": {
-    "my-command": {
-      "model": "openai/gpt-4o-mini"
-    }
-  }
-}
-```
-
-If you share this command with a colleague who uses Anthropic, or if you switch to a different provider on another computer, you need to manually update the model in your config. This becomes tedious and error-prone as you accumulate more commands.
-
-### The Solution
-
-With aliases, you can use a consistent identifier in V1 agent and command model fields, or bind V2 agents to an alias. The alias file stays local to each machine:
-
-1. **In your shared config:** Use the alias
-
-   ```json
-   {
-     "command": {
-       "my-command": {
-         "model": "cheap"
-       }
-     }
-   }
-   ```
-
-2. **On each machine:** Define the alias in `~/.config/opencode/model-aliases.json`
-   ```json
-   {
-     "cheap": "openai/gpt-4o-mini"
-   }
-   ```
-
-V1 resolves aliases in configured `agent.*.model` and `command.*.model` fields. V2 applies aliases only to agents listed in the plugin's `options.agents` map; see [V1 and V2 Compatibility](#v1-and-v2-compatibility). In both cases, each computer maps the same alias to a model available on that machine.
-
-Aliases can also **chain** — an alias pointing at another alias — so you can define stable role names (like `reviewer`) on top of machine-specific model mappings (see [Alias Chains](#alias-chains)).
-
 ## Usage
 
-### V1 and V2 Compatibility
+### Configure agents (V2)
 
-The plugin supports both OpenCode plugin API generations, but their hooks and alias behavior are different:
+Bind agents to an alias through `options.agents`, as in the [V2 installation example](#opencode-v2).
 
-| OpenCode API | Plugin registration | Where aliases apply |
-| --- | --- | --- |
-| V1 (1.18.29+) | `plugin` array | Configured `agent.*.model` and `command.*.model` values |
-| V2 | `plugins` array of objects | Only agents explicitly bound in `options.agents` |
-
-V2 example (`opencode.jsonc`):
-
-```json
-{
-  "plugins": [
-    {
-      "package": "@renaudcerrato/opencode-model-alias@2.0.0",
-      "options": {
-        "agents": {
-          "reviewer": "cheap",
-          "planner": "cheap"
-        }
-      }
-    }
-  ],
-  "agents": {
-    "reviewer": { "description": "Reviews changes", "system": "Review the work." },
-    "planner": { "description": "Plans work", "system": "Plan the work." }
-  }
-}
-```
-
-Leave `model` out of each bound V2 agent definition so the alias can supply it; an explicit agent model can take precedence. The plugin transforms those agent models in memory and does not edit your config files. V2 does **not** automatically resolve aliases in command model fields or default models. Use direct `provider/model` identifiers for those settings. A command's explicitly configured model takes precedence over its agent's model.
+Define `cheap` in the local [alias file](#alias-file-location). Changing that one target switches both agents, even across providers. Leave `model` out of bound agent definitions: an explicit model can override the plugin's in-memory assignment. V2 does not resolve aliases in command model fields or the default model; use direct `provider/model` identifiers there. An explicit command model takes precedence over its agent's model.
 
 ### The `/alias` Command
 
@@ -168,11 +105,9 @@ In V2, run `/alias` in OpenChamber/Desktop. The plugin command uses one agent tu
 
 > **V2 behavior note:** The command result is passed directly to an ordinary tool-capable model turn, without any additional prompt instructions. Alias data comes from the local, user-controlled file; the prompt is not a security boundary. Only the first 1,200 characters of the result are passed to that turn, so a long `/alias list` may omit later entries from its feedback.
 
-### Using Aliases
+### Using aliases in V1
 
-#### V1 agent and command models
-
-In V1, use aliases in configured agent and command model fields (for example, in `~/.config/opencode/opencode.json`):
+OpenCode V1 (1.18.29+) resolves aliases in configured agent and command model fields:
 
 ```json
 {
@@ -183,7 +118,7 @@ In V1, use aliases in configured agent and command model fields (for example, in
   },
   "command": {
     "my-command": {
-      "model": "expensive"
+      "model": "cheap"
     }
   }
 }
@@ -199,13 +134,11 @@ model: cheap
 ---
 ```
 
-The V1 config hook resolves these aliases from the alias file before use. V2 uses the `options.agents` binding shown above instead of alias-valued `agent.model` fields; command model fields are not aliased in V2.
-
 ### Alias Definitions
 
 Aliases live in `model-aliases.json` (see [Alias File Location](#alias-file-location)). Two forms are supported:
 
-**String form** — maps an alias to a model or to another alias:
+**String form** — maps an alias to a model or another alias:
 
 ```json
 {
@@ -214,7 +147,7 @@ Aliases live in `model-aliases.json` (see [Alias File Location](#alias-file-loca
 }
 ```
 
-**Object form** — a complete preset with an optional model variant:
+**Object form** — selects a direct model and an optional variant:
 
 ```json
 {
@@ -231,36 +164,12 @@ Rules:
 - The optional `variant` must be listed in the model's provider metadata; `/alias set` validates this and rejects unsupported variants, listing the supported ones.
 - Setting an alias without a variant removes any previous variant (complete replacement).
 - String alias chains inherit the variant of the nearest object-form entry in their resolution chain.
-- Where aliases are applied, an alias-provided variant **overrides** the configured variant (V1 agent/command models and V2 bound agents).
+- In V1, an alias-provided variant overrides a configured agent or command variant. In V2, it is assigned to bound agents.
 - Chains support up to 16 hops; cycles are rejected.
 - Deleting an alias that other aliases chain through is refused — the error names the dependent aliases. Delete those first, or bypass the check with `alias delete <key> force`.
 - In V1, alias keys **shadow model references**: an agent/command `model` matching an alias key is always resolved through it, even if it looks like a `provider/model` identifier. Avoid naming aliases after real model ids.
 
-### Alias Chains
-
-A string alias can point at **another alias** instead of a model. When OpenCode resolves a model reference, it follows the chain until it reaches a real model — so you can layer aliases on top of each other:
-
-```json
-{
-  "cheap": {
-    "model": "openai/gpt-5.6-luna",
-    "variant": "max"
-  },
-  "reviewer": "cheap",
-  "researcher": "cheap"
-}
-```
-
-Here `reviewer` and `researcher` both resolve to `openai/gpt-5.6-luna` with variant `max`:
-
-```
-reviewer → cheap → openai/gpt-5.6-luna [max]
-researcher → cheap → openai/gpt-5.6-luna [max]
-```
-
-This is the portability story one level deeper: `cheap` is the machine-specific mapping, while `reviewer` and `researcher` are stable role names your V1 agents/commands or V2 bound agents can use. Switch this machine to a different model by changing **one line** — every role alias follows. `/alias list` shows the full chain for each alias, including the inherited variant.
-
-Chains can be several hops deep (`a → b → c → provider/model`), which is handy for progressive refinement — e.g. a generic `fast` alias, a team-level `reviewer → fast`, and a personal override on top. Two guardrails keep chains sane: resolution stops after **16 hops**, and **cycles are rejected**. Deleting an alias that others chain through is refused (see the rules above) so a chain is never silently broken.
+For example, with `"reviewer": "cheap"` and `"cheap": { "model": "openai/gpt-4o-mini", "variant": "max" }`, `reviewer` inherits variant `max`. `/alias list` shows the full chain.
 
 ### Alias File Location
 
@@ -268,7 +177,7 @@ The alias file lives at `~/.config/opencode/model-aliases.json` by default. It u
 
 The alias file is not created at startup. `/alias set` creates the config directory if needed and writes the file.
 
-The JSON format and path are the same for V1 and V2. Keep the alias name stable and point it at a model available on each machine. For example, V2 agents `reviewer` and `planner` can both use `cheap`, while each machine maps it to a different provider:
+The file format and path are the same for V1 and V2. The same `cheap` alias can target different providers on different machines:
 
 Workstation A:
 
@@ -282,32 +191,12 @@ Workstation B:
 { "cheap": "ollama-cloud/glm-5.3-flash" }
 ```
 
-Each model target must be available from a provider configured on that machine.
-
-Example `model-aliases.json`:
-
-```json
-{
-  "cheap": {
-    "model": "openai/gpt-5.6-luna",
-    "variant": "max"
-  },
-  "genius": {
-    "model": "openai/gpt-5.6-sol"
-  },
-  "smart": {
-    "model": "ollama-cloud/glm-5.3-flash",
-    "variant": "max"
-  },
-  "reviewer": "cheap",
-  "researcher": "cheap"
-}
-```
+Each target must be available from a provider configured on that machine.
 
 ### Migrate from V1 to V2
 
 1. Keep `model-aliases.json` at the same path; its JSON syntax does not change.
-2. Replace the V1 `plugin` entry with the V2 `plugins` object and add agent-to-alias bindings under `options.agents` (see the example above).
+2. Replace the V1 `plugin` entry with the V2 `plugins` object and add agent-to-alias bindings under `options.agents` (see [Configure agents (V2)](#configure-agents-v2)).
 3. Remove `model` from each bound V2 agent definition. V2 command model fields and default models are not automatically aliased; replace alias values there with direct `provider/model` identifiers. Explicit command models continue to override agent models.
 4. Restart OpenCode after updating the plugin configuration or aliases.
 
@@ -323,7 +212,7 @@ npm run typecheck
 
 ## References
 
-- [OpenCode Plugins Documentation](https://opencode.ai/docs/plugins/)
+- [OpenCode V2 Plugins Documentation](https://opencode.ai/v2/docs/build/plugins)
 - [GitHub Issue #3439](https://github.com/anomalyco/opencode/issues/3439)
 
 ## Credit/Inspirations
