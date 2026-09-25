@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.1.0] - 2026-09-25
+
+### Added
+- OpenCode V2 accepts machine-specific definitions in `plugins[].options.aliases`; when this option is absent, it reads `model-aliases.json` as a legacy fallback.
+
+### Changed
+- **Breaking for V2:** `/alias` commands are no longer registered. Edit `options.aliases` in `opencode.jsonc` instead. V1 retains `/alias` and its file-backed behavior.
+- An explicit empty `options.aliases` disables the file fallback; malformed alias options fail plugin loading. Already-selected session models may keep their previous model after a config reload.
+- Invalid agent bindings in explicit V2 options now fail plugin loading with a diagnostic rather than silently leaving the affected agents on fallback models.
+
 ## [2.0.0] - 2026-09-25
 
 ### Added

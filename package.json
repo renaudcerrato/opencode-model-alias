@@ -1,6 +1,6 @@
 {
   "name": "@renaudcerrato/opencode-model-alias",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "OpenCode plugin that allows users to define model aliases for consistent use across machines.",
   "main": "src/index.ts",
   "exports": {
@@ -10,6 +10,7 @@
   "files": [
     "src",
     "README.md",
+    "V1.md",
     "CHANGELOG.md",
     "LICENSE"
   ],

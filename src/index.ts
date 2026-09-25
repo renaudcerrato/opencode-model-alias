@@ -18,9 +18,10 @@
  * alias-provided variant overrides any variant configured on the agent
  * or command.
  *
- * Manage aliases with `/alias list`, `/alias set <key> <provider/model> [variant]`,
- * `/alias delete <key>`, and `/alias help`. Use `!opencode models` to find
- * model identifiers in the correct `provider/model` format.
+ * V1 manages aliases with `/alias list`, `/alias set <key> <provider/model>
+ * [variant]`, `/alias delete <key>`, and `/alias help`. V2 uses
+ * `plugins[].options.aliases`, falling back to this file when that option
+ * is absent; V2 does not register an `/alias` command.
  *
  * Agent and command models support alias chains up to 16 hops. `/alias set`
  * resolves existing aliases from JSON and verifies missing targets against
@@ -120,29 +121,7 @@ function ensureConfigDir(): void {
 	}
 }
 
-function readAliases(): AliasMap {
-	let raw: string;
-	try {
-		raw = readFileSync(ALIAS_FILE, "utf-8");
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
-		throw new Error(`alias file unreadable: ${ALIAS_FILE}`);
-	}
-	// Tolerate a leading UTF-8 BOM: Windows editors and PowerShell emit one,
-	// and JSON.parse would otherwise reject an otherwise-valid file.
-	if (raw.charCodeAt(0) === 0xfeff) {
-		raw = raw.slice(1);
-	}
-	// A zero-byte or whitespace-only file means "no aliases yet" (the plugin
-	// never creates the file, so users often touch it first), not a corrupt
-	// file.
-	if (raw.trim() === "") return {};
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(raw);
-	} catch {
-		throw new Error(`alias file unreadable or invalid JSON: ${ALIAS_FILE}`);
-	}
+function parseAliases(parsed: unknown): AliasMap {
 	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
 		throw new Error("alias file must be a JSON object of alias definitions");
 	}
@@ -183,6 +162,32 @@ function readAliases(): AliasMap {
 		}
 	}
 	return result;
+}
+
+function readAliases(): AliasMap {
+	let raw: string;
+	try {
+		raw = readFileSync(ALIAS_FILE, "utf-8");
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
+		throw new Error(`alias file unreadable: ${ALIAS_FILE}`);
+	}
+	// Tolerate a leading UTF-8 BOM: Windows editors and PowerShell emit one,
+	// and JSON.parse would otherwise reject an otherwise-valid file.
+	if (raw.charCodeAt(0) === 0xfeff) {
+		raw = raw.slice(1);
+	}
+	// A zero-byte or whitespace-only file means "no aliases yet" (the plugin
+	// never creates the file, so users often touch it first), not a corrupt
+	// file.
+	if (raw.trim() === "") return {};
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch {
+		throw new Error(`alias file unreadable or invalid JSON: ${ALIAS_FILE}`);
+	}
+	return parseAliases(parsed);
 }
 
 function writeAliases(aliases: AliasMap): void {
@@ -461,33 +466,6 @@ export {
 };
 
 type FetchProviders = () => Promise<ProviderListEntry[]>;
-
-// V2 lists active models directly (with array-valued variants), unlike the
-// v1 provider response's `data.all` and record-valued variants.
-async function fetchV2Providers(
-	ctx: V2Plugin.Context,
-): Promise<ProviderListEntry[]> {
-	const response = await ctx.model.list();
-	if (!Array.isArray(response.data)) {
-		throw new Error("model list returned an unexpected shape");
-	}
-	return response.data
-		.filter((model) => model.enabled)
-		.map((model) => ({
-			id: model.providerID,
-			models: [{
-				id: model.id,
-				variants: Object.fromEntries(
-					model.variants.map((variant) => [variant.id, {}]),
-				),
-			}],
-		}));
-}
-
-function maintenancePrompt(result: string): string {
-	const excerpt = result.slice(0, 1200) + (result.length > 1200 ? "… (truncated)" : "");
-	return excerpt;
-}
 
 function aliasHelp(): string {
 	return `Usage: /alias <subcommand> [options]
@@ -812,55 +790,51 @@ const pluginModule = {
 	...V2Plugin.define({
 		id: "opencode-model-alias",
 		async setup(ctx) {
+			const configured = Object.hasOwn(ctx.options ?? {}, "aliases");
 			const bindings = agentBindings(ctx.options);
-			if (bindings.length > 0) {
-				let aliases: AliasMap | undefined;
+			if (configured && ctx.options.agents !== undefined) {
+				const agents = ctx.options.agents;
+				if (
+					typeof agents !== "object" ||
+					agents === null ||
+					Array.isArray(agents) ||
+					Object.keys(agents).length !== bindings.length
+				) {
+					throw new Error("Invalid plugin option 'agents': expected agent IDs mapped to non-empty alias names");
+				}
+			}
+			if (!configured && bindings.length === 0) return;
+			let aliases: AliasMap;
+			if (configured) {
+				try {
+					aliases = parseAliases(ctx.options.aliases);
+				} catch (error) {
+					throw new Error(`Invalid plugin option 'aliases': ${String(error)}`);
+				}
+			} else {
 				try {
 					aliases = readAliases();
 				} catch {
-					// A malformed/unreadable alias file leaves agent models alone.
-				}
-				if (aliases) {
-					const resolved = resolveAgentBindings(bindings, aliases);
-					if (resolved.length > 0) {
-						await ctx.agent.transform((editor) => {
-							for (const [agentID, model] of resolved) {
-								// An explicit model in v2's agent config takes precedence
-								// later; configure other agent fields without a model.
-								editor.update(agentID, (agent) => {
-									agent.model = model;
-								});
-							}
-						});
-					}
+					// Legacy alias-file failures do not prevent V2 startup.
+					return;
 				}
 			}
-
-			// Configured commands are loaded after plugin commands in v2, so a
-			// user-defined /alias is allowed to take precedence naturally.
-			await ctx.command.transform((editor) => {
-				editor.add({
-					name: "alias",
-					description: "Manage model aliases (list, set, delete)",
-					async execute(input) {
-						let result: string;
-						try {
-							result = await handleAliasCommand(
-								input.prompt.text,
-								() => fetchV2Providers(ctx),
-							);
-						} catch (error) {
-							result = `Error: ${error instanceof Error ? error.message : "alias command failed"}`;
-						}
-						// V2 has no per-prompt tool restriction; request one bounded
-						// maintenance reply instead of another command execution.
-						await ctx.session.prompt({
-							sessionID: input.sessionID,
-							text: maintenancePrompt(result),
-							delivery: input.delivery,
-						});
-					},
-				});
+			const resolved = resolveAgentBindings(bindings, aliases);
+			if (configured && resolved.length !== bindings.length) {
+				const valid = new Set(resolved.map(([agentID]) => agentID));
+				const invalid = bindings
+					.filter(([agentID]) => !valid.has(agentID))
+					.map(([agentID, aliasName]) => `${agentID} (${aliasName})`);
+				throw new Error(`Invalid agent alias bindings in options.agents: ${invalid.join(", ")}`);
+			}
+			if (resolved.length === 0) return;
+			await ctx.agent.transform((editor) => {
+				for (const [agentID, model] of resolved) {
+					// A configured agent model takes precedence over this transform.
+					editor.update(agentID, (agent) => {
+						agent.model = model;
+					});
+				}
 			});
 		},
 	}),

@@ -2424,8 +2424,7 @@ describe("plugin module export", () => {
 	});
 });
 
-// Exercise the v2 host boundary instead of the alias resolver's private
-// representation: editor updates and command results are what users observe.
+// V2 changes agent definitions only; command management remains V1-only.
 describe("v2 plugin integration", () => {
 	beforeEach(() => {
 		Object.keys(mockFs).forEach((key) => delete mockFs[key]);
@@ -2435,225 +2434,154 @@ describe("v2 plugin integration", () => {
 		const agents: Record<string, { model?: unknown }> = {
 			reviewer: {}, researcher: {}, direct: { model: "keep/me" }, broken: {},
 		};
-		let execute: ((input: any) => Promise<void>) | undefined;
-		const prompt = jest.fn(async () => {});
-		const modelList = jest.fn(async (): Promise<any> => ({ data: [
-			{ providerID: "openai", id: "gpt-4o-mini", enabled: true, variants: [{ id: "max" }, { id: "low" }] },
-			{ providerID: "openai", id: "disabled", enabled: false, variants: [{ id: "max" }] },
-		] }));
 		const agentTransform = jest.fn(async (callback: any) => callback({
 			update: (id: string, change: (agent: any) => void) => change(agents[id] ??= {}),
 		}));
-		const commandTransform = jest.fn(async (callback: any) => callback({
-			add: (command: any) => {
-				if (command.name === "alias") execute = command.execute;
-			},
-		}));
-		const ctx = {
-			options,
-			agent: { transform: agentTransform },
-			command: { transform: commandTransform },
-			model: { list: modelList },
-			session: { prompt },
-		};
+		const commandTransform = jest.fn();
 		return {
-			agents, prompt, modelList, agentTransform, commandTransform,
-			setup: async () => pluginModule.setup(ctx as any),
-			runInput: async (input: any) => {
-				if (!execute) throw new Error("/alias not registered");
-				await execute(input);
-			},
-			run: async (text: string) => {
-				if (!execute) throw new Error("/alias not registered");
-				await execute({ prompt: { text }, sessionID: "session-1", delivery: "normal" });
-			},
+			agents, agentTransform, commandTransform,
+			setup: async () => pluginModule.setup({
+				options,
+				agent: { transform: agentTransform },
+				command: { transform: commandTransform },
+			} as any),
 		};
 	}
 
-	test("assigns the same resolved model and inherited variant to multiple bound agents", async () => {
-		// Arrange: both roles share a portable chain; a third agent is not bound.
-		mockFs[ALIAS_FILE] = JSON.stringify({ reviewer: "cheap", cheap: { model: "openai/gpt-4o-mini", variant: "max" } });
-		const app = host({ agents: { reviewer: "reviewer", researcher: "reviewer" } });
-		// Act
+	test("options aliases map multiple agents across providers and inherit variants", async () => {
+		// The configured map takes priority even when the legacy file is broken.
+		mockFs[ALIAS_FILE] = "invalid{";
+		const app = host({
+			agents: { reviewer: "reviewer", researcher: "reviewer" },
+			aliases: { reviewer: "cheap", cheap: { model: "perso/gpt-6-sol", variant: "medium" } },
+		});
+
 		await app.setup();
-		// Assert: v2 receives provider/model references, not alias names.
-		expect(app.agents.reviewer.model).toEqual({ providerID: "openai", id: "gpt-4o-mini", variant: "max" });
+
+		expect(app.agents.reviewer.model).toEqual({ providerID: "perso", id: "gpt-6-sol", variant: "medium" });
 		expect(app.agents.researcher.model).toEqual(app.agents.reviewer.model);
 		expect(app.agents.direct.model).toBe("keep/me");
-		expect(app.commandTransform).toHaveBeenCalledTimes(1);
+		expect(app.commandTransform).not.toHaveBeenCalled();
 	});
 
+	test("the same alias bindings pick up new options when the host reloads each location", async () => {
+		const agents = { reviewer: "cheap", researcher: "cheap" };
+		const before = host({ agents, aliases: { cheap: "openai/gpt-4o-mini" } });
+		await before.setup();
+		const after = host({ agents, aliases: { cheap: { model: "perso/gpt-6-sol", variant: "max" } } });
+
+		await after.setup();
+
+		expect(before.agents.reviewer.model).toEqual({ providerID: "openai", id: "gpt-4o-mini" });
+		expect(after.agents.reviewer.model).toEqual({ providerID: "perso", id: "gpt-6-sol", variant: "max" });
+		expect(after.agents.researcher.model).toEqual(after.agents.reviewer.model);
+	});
+
+	test("missing options.aliases falls back to the legacy file", async () => {
+		mockFs[ALIAS_FILE] = '{"reviewer":"cheap","cheap":{"model":"openai/gpt-4o-mini","variant":"max"}}';
+		const app = host({ agents: { reviewer: "reviewer" } });
+
+		await app.setup();
+
+		expect(app.agents.reviewer.model).toEqual({ providerID: "openai", id: "gpt-4o-mini", variant: "max" });
+		expect(app.commandTransform).not.toHaveBeenCalled();
+	});
+
+	test("an explicit empty aliases map disables the legacy file fallback", async () => {
+		mockFs[ALIAS_FILE] = '{"cheap":"openai/gpt-4o-mini"}';
+		const app = host({ aliases: {}, agents: { reviewer: "cheap" } });
+
+		await expect(app.setup()).rejects.toThrow(/reviewer \(cheap\)/);
+
+		expect(app.agents.reviewer.model).toBeUndefined();
+		expect(app.agentTransform).not.toHaveBeenCalled();
+	});
+
+	test.each([null, [], 42, { bad: 42 }, { bad: { model: "not-a-model" } }])(
+		"invalid options.aliases %p fails visibly instead of falling back",
+		async (aliases) => {
+			mockFs[ALIAS_FILE] = '{"cheap":"openai/gpt-4o-mini"}';
+			const app = host({ aliases, agents: { reviewer: "cheap" } });
+
+			await expect(app.setup()).rejects.toThrow(/Invalid plugin option 'aliases'/);
+			expect(app.agentTransform).not.toHaveBeenCalled();
+		},
+	);
+
+	test.each([null, [], "invalid", { reviewer: 42 }, { " bad ": "cheap" }])(
+		"invalid agent bindings %p fail visibly with configured aliases",
+		async (agents) => {
+			const app = host({ agents, aliases: { cheap: "openai/gpt-4o-mini" } });
+
+			await expect(app.setup()).rejects.toThrow(/Invalid plugin option 'agents'/);
+			expect(app.agentTransform).not.toHaveBeenCalled();
+		},
+	);
+
 	test.each([
-		["missing alias", { missing: "absent" }, { valid: "openai/gpt-4o-mini" }],
+		["missing alias", {}, { broken: "missing" }],
 		["cycle", { bad: "other", other: "bad" }, { broken: "bad" }],
 		["unresolved name", { bad: "not-a-model" }, { broken: "bad" }],
 		["invalid model reference", { bad: "openai/gpt#oops" }, { broken: "bad" }],
 		["invalid variant", { bad: { model: "openai/gpt-4o-mini", variant: "has space" } }, { broken: "bad" }],
-	])("skips %s without preventing valid agents or command registration", async (_reason, invalid, binding) => {
-		// Arrange
-		mockFs[ALIAS_FILE] = JSON.stringify({ ...invalid, valid: "openai/gpt-4o-mini" });
-		const app = host({ agents: { ...binding, reviewer: "valid" } });
-		// Act
-		await app.setup();
-		// Assert
+	])("reports %s instead of silently ignoring a configured binding", async (_reason, invalid, binding) => {
+		const app = host({ agents: { ...binding, reviewer: "valid" }, aliases: { ...invalid, valid: "openai/gpt-4o-mini" } });
+
+		await expect(app.setup()).rejects.toThrow(/Invalid agent alias bindings.*broken/);
+
 		expect(app.agents.broken.model).toBeUndefined();
-		expect(app.agents.reviewer.model).toEqual({ providerID: "openai", id: "gpt-4o-mini" });
-		expect(app.commandTransform).toHaveBeenCalledTimes(1);
+		expect(app.agentTransform).not.toHaveBeenCalled();
 	});
 
-	test("skips a chain beyond the 16-hop limit but keeps a separate binding", async () => {
-		// Arrange
+	test("reports chains beyond the 16-hop limit", async () => {
 		const aliases: Record<string, string> = { valid: "openai/gpt-4o-mini" };
-		for (let hop = 1; hop <= 17; hop++) aliases[`hop${hop}`] = hop === 17 ? "openai/gpt-4o-mini" : `hop${hop + 1}`;
-		mockFs[ALIAS_FILE] = JSON.stringify(aliases);
-		const app = host({ agents: { broken: "hop1", reviewer: "valid" } });
-		// Act
-		await app.setup();
-		// Assert
+		for (let i = 1; i <= 17; i++) aliases[`hop${i}`] = i === 17 ? "openai/gpt-4o-mini" : `hop${i + 1}`;
+		const app = host({ agents: { broken: "hop1", reviewer: "valid" }, aliases });
+
+		await expect(app.setup()).rejects.toThrow(/broken \(hop1\)/);
+
 		expect(app.agents.broken.model).toBeUndefined();
-		expect(app.agents.reviewer.model).toEqual({ providerID: "openai", id: "gpt-4o-mini" });
+		expect(app.agentTransform).not.toHaveBeenCalled();
 	});
 
-	test.each([null, { agents: [] }, { agents: { " bad ": "valid", broken: " bad ", reviewer: 42 } }])(
-		"ignores malformed binding options %p without disrupting /alias", async (options) => {
-			// Arrange
-			mockFs[ALIAS_FILE] = '{"valid":"openai/gpt-4o-mini"}';
-			const app = host(options);
-			// Act
-			await app.setup();
-			// Assert
-			expect(app.agentTransform).not.toHaveBeenCalled();
-			expect(app.commandTransform).toHaveBeenCalledTimes(1);
-		},
-	);
-
-	test("malformed alias file does not prevent v2 startup or overwrite agent models", async () => {
-		// Arrange
+	test("malformed legacy file does not prevent startup", async () => {
 		mockFs[ALIAS_FILE] = "broken{";
 		const app = host({ agents: { direct: "cheap" } });
-		// Act
-		await app.setup();
-		// Assert
-		expect(app.agents.direct.model).toBe("keep/me");
-		expect(app.commandTransform).toHaveBeenCalledTimes(1);
-	});
 
-	test("unknown agent aliases leave existing models intact while /alias remains available", async () => {
-		// Arrange: the file is valid, but the requested binding is not defined.
-		mockFs[ALIAS_FILE] = '{"cheap":"openai/gpt-4o-mini"}';
-		const app = host({ agents: { direct: "missing" } });
-		// Act
 		await app.setup();
-		// Assert
+
 		expect(app.agents.direct.model).toBe("keep/me");
 		expect(app.agentTransform).not.toHaveBeenCalled();
-		expect(app.commandTransform).toHaveBeenCalledTimes(1);
 	});
 
-	test.each([
-		["help", /Usage: \/alias/, false],
-		["list", /cheap → openai\/gpt-4o-mini/, false],
-		["set smart openai\/gpt-4o-mini max", /Alias 'smart' set/, true],
-		["delete cheap", /Alias 'cheap' deleted/, false],
-	])("executes /alias %s once and requests one bounded maintenance reply", async (text, result, fetchModels) => {
-		// Arrange
+	test("unbound options aliases do not change agents", async () => {
+		const app = host({ aliases: { cheap: "openai/gpt-4o-mini" } });
+
+		await app.setup();
+
+		expect(app.agents.direct.model).toBe("keep/me");
+		expect(app.agentTransform).not.toHaveBeenCalled();
+	});
+
+	test("legacy file fallback keeps invalid bindings tolerant", async () => {
 		mockFs[ALIAS_FILE] = '{"cheap":"openai/gpt-4o-mini"}';
-		const app = host();
+		const app = host({ agents: { direct: "missing" } });
+
 		await app.setup();
-		let writes = 0;
-		const originalRename = fs.renameSync;
-		stubFs("renameSync", (...args: any[]) => {
-			writes++;
-			return originalRename(...args as [any, any]);
-		});
-		// Act: the prompt carries raw command text, not a v1 arguments field.
-		await app.run(text);
-		// Assert
-		expect(app.prompt).toHaveBeenCalledTimes(1);
-		const delivered = app.prompt.mock.calls[0][0] as any;
-		expect(delivered).toEqual({ sessionID: "session-1", delivery: "normal", text: expect.stringMatching(result) });
-		expect(delivered.text).not.toContain("The /alias maintenance command");
-		expect(delivered.text.length).toBeLessThan(1800);
-		expect(writes).toBe(text.startsWith("set ") || text.startsWith("delete ") ? 1 : 0);
-		expect(app.modelList).toHaveBeenCalledTimes(fetchModels ? 1 : 0);
-		expect(readAliases().smart).toEqual(fetchModels ? { model: "openai/gpt-4o-mini", variant: "max" } : undefined);
+
+		expect(app.agents.direct.model).toBe("keep/me");
+		expect(app.agentTransform).not.toHaveBeenCalled();
 	});
 
-	test("v2 list feedback preserves actual line breaks", async () => {
-		mockFs[ALIAS_FILE] = '{"cheap":"openai/gpt-4o-mini","smart":"openai/gpt-4o-mini"}';
-		const app = host();
-		await app.setup();
-		await app.run("list");
-		const delivered = (app.prompt.mock.calls[0][0] as any).text as string;
-		expect(delivered).toBe("Model aliases:\n  cheap → openai/gpt-4o-mini\n  smart → openai/gpt-4o-mini");
-		expect(delivered).not.toContain("Model aliases:\\n");
-	});
+	test.each([null, [], "invalid", {}, { agents: [] }, { agents: { " bad ": "cheap", reviewer: 42 } }])(
+		"no valid bindings in %p cause no agent or command registrations",
+		async (options) => {
+			const app = host(options);
 
-	test.each([
-		["set x openai/unknown", /not available/, 1],
-		["set x openai/disabled", /not available/, 1],
-		["set x openai/gpt-4o-mini turbo", /variant 'turbo' is not listed/, 1],
-		["delete missing", /does not exist/, 0],
-		["unknown", /Unknown subcommand/, 0],
-	])("reports /alias %s failure once without changing the file", async (text, error, fetches) => {
-		// Arrange
-		mockFs[ALIAS_FILE] = '{"cheap":"openai/gpt-4o-mini"}';
-		const app = host();
-		await app.setup();
-		const original = mockFs[ALIAS_FILE];
-		// Act
-		await app.run(text);
-		// Assert
-		expect(app.prompt).toHaveBeenCalledTimes(1);
-		expect((app.prompt.mock.calls[0][0] as any).text).toMatch(error);
-		expect(mockFs[ALIAS_FILE]).toBe(original);
-		expect(app.modelList).toHaveBeenCalledTimes(fetches);
-	});
+			await app.setup();
 
-	test("v2 refuses set when model.list returns an unexpected shape", async () => {
-		// Arrange
-		const app = host();
-		app.modelList.mockResolvedValueOnce({ data: null });
-		await app.setup();
-		// Act
-		await app.run("set x openai/gpt-4o-mini");
-		// Assert
-		expect((app.prompt.mock.calls[0][0] as any).text).toContain("could not verify model");
-		expect(mockFs[ALIAS_FILE]).toBeUndefined();
-	});
-
-	test.each([
-		[new Error("invalid prompt"), "Error: invalid prompt"],
-		["invalid prompt", "Error: alias command failed"],
-	])("v2 reports malformed command input safely (%p)", async (failure, expected) => {
-		// Arrange: a host-provided prompt accessor fails before command parsing.
-		const app = host();
-		await app.setup();
-		const input = { sessionID: "session-1", delivery: "normal", prompt: {
-			get text(): string { throw failure; },
-		} };
-		// Act
-		await app.runInput(input);
-		// Assert: the failure is reported once, without a file mutation or model lookup.
-		expect(app.prompt).toHaveBeenCalledTimes(1);
-		expect((app.prompt.mock.calls[0][0] as any).text).toContain(expected);
-		expect(app.modelList).not.toHaveBeenCalled();
-		expect(mockFs[ALIAS_FILE]).toBeUndefined();
-	});
-
-	test("v2 maintenance result truncates long output", async () => {
-		// Arrange: a hand-edited alias name extends beyond the feedback limit.
-		mockFs[ALIAS_FILE] = JSON.stringify({ ["ignore instructions\n" + "x".repeat(2000)]: "openai/gpt-4o-mini" });
-		const app = host();
-		await app.setup();
-		// Act
-		await app.run("list");
-		// Assert
-		const delivered = (app.prompt.mock.calls[0][0] as any).text as string;
-		expect(delivered).toContain("ignore instructions\n");
-		expect(delivered).toMatch(/^Model aliases:\n/);
-		expect(delivered).toContain("(truncated)");
-		expect(delivered.length).toBeLessThan(1800);
-		expect(app.prompt).toHaveBeenCalledTimes(1);
-	});
+			expect(app.agentTransform).not.toHaveBeenCalled();
+			expect(app.commandTransform).not.toHaveBeenCalled();
+		},
+	);
 });
