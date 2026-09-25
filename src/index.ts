@@ -38,8 +38,9 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { Config, Plugin, PluginModule } from "@opencode-ai/plugin";
+import type { Config, Plugin as V1Plugin, PluginModule } from "@opencode-ai/plugin";
 import type { Part } from "@opencode-ai/sdk";
+import { Model, Plugin as V2Plugin } from "@opencode/plugin";
 
 // Mirror opencode's own global-config resolution (packages/core/src/global.ts):
 //   1. OPENCODE_CONFIG_DIR env var, if set
@@ -339,6 +340,58 @@ function resolveConfigAliases(config: Config): void {
 	applyAliasesToConfig(config, aliases);
 }
 
+function agentBindings(options: unknown): Array<[string, string]> {
+	if (typeof options !== "object" || options === null || Array.isArray(options))
+		return [];
+	const agents = (options as Record<string, unknown>).agents;
+	if (typeof agents !== "object" || agents === null || Array.isArray(agents))
+		return [];
+
+	const bindings: Array<[string, string]> = [];
+	for (const [agentID, aliasName] of Object.entries(agents)) {
+		if (
+			!agentID ||
+			agentID.trim() !== agentID ||
+			typeof aliasName !== "string" ||
+			!aliasName ||
+			aliasName.trim() !== aliasName
+		)
+			continue;
+		bindings.push([agentID, aliasName]);
+	}
+	return bindings;
+}
+
+function resolveAgentBindings(
+	bindings: Array<[string, string]>,
+	aliases: AliasMap,
+): Array<[string, Model.Ref]> {
+	const resolved: Array<[string, Model.Ref]> = [];
+	for (const [agentID, aliasName] of bindings) {
+		if (!hasAlias(aliases, aliasName)) continue;
+		const target = resolveAliasDetails(aliasName, aliases);
+		if (
+			target.failure ||
+			!target.value ||
+			!isModelIdentifier(target.value) ||
+			target.value.includes("#") ||
+			(target.variant && /\s/.test(target.variant))
+		)
+			continue;
+		try {
+			resolved.push([
+				agentID,
+				Model.Ref.parse(
+					`${target.value}${target.variant ? `#${target.variant}` : ""}`,
+				),
+			]);
+		} catch {
+			// An invalid v2 model reference must not prevent other agents loading.
+		}
+	}
+	return resolved;
+}
+
 type ProviderListEntry = {
 	id?: unknown;
 	models?: unknown;
@@ -408,6 +461,33 @@ export {
 };
 
 type FetchProviders = () => Promise<ProviderListEntry[]>;
+
+// V2 lists active models directly (with array-valued variants), unlike the
+// v1 provider response's `data.all` and record-valued variants.
+async function fetchV2Providers(
+	ctx: V2Plugin.Context,
+): Promise<ProviderListEntry[]> {
+	const response = await ctx.model.list();
+	if (!Array.isArray(response.data)) {
+		throw new Error("model list returned an unexpected shape");
+	}
+	return response.data
+		.filter((model) => model.enabled)
+		.map((model) => ({
+			id: model.providerID,
+			models: [{
+				id: model.id,
+				variants: Object.fromEntries(
+					model.variants.map((variant) => [variant.id, {}]),
+				),
+			}],
+		}));
+}
+
+function maintenancePrompt(result: string): string {
+	const excerpt = result.slice(0, 1200) + (result.length > 1200 ? "… (truncated)" : "");
+	return excerpt;
+}
 
 function aliasHelp(): string {
 	return `Usage: /alias <subcommand> [options]
@@ -647,7 +727,7 @@ async function handleAliasCommand(
 	return "Unknown subcommand. Use 'alias help' for usage information.";
 }
 
-export const aliasPlugin: Plugin = async ({ client, directory }) => {
+export const aliasPlugin: V1Plugin = async ({ client, directory }) => {
 	const fetchProviderList = async (): Promise<ProviderListEntry[]> => {
 		const response = await client.provider.list({ query: { directory } });
 		if (response.error) {
@@ -728,9 +808,63 @@ export const aliasPlugin: Plugin = async ({ client, directory }) => {
 
 export const server = aliasPlugin;
 
-const pluginModule: PluginModule = {
-	id: "opencode-model-alias",
+const pluginModule = {
+	...V2Plugin.define({
+		id: "opencode-model-alias",
+		async setup(ctx) {
+			const bindings = agentBindings(ctx.options);
+			if (bindings.length > 0) {
+				let aliases: AliasMap | undefined;
+				try {
+					aliases = readAliases();
+				} catch {
+					// A malformed/unreadable alias file leaves agent models alone.
+				}
+				if (aliases) {
+					const resolved = resolveAgentBindings(bindings, aliases);
+					if (resolved.length > 0) {
+						await ctx.agent.transform((editor) => {
+							for (const [agentID, model] of resolved) {
+								// An explicit model in v2's agent config takes precedence
+								// later; configure other agent fields without a model.
+								editor.update(agentID, (agent) => {
+									agent.model = model;
+								});
+							}
+						});
+					}
+				}
+			}
+
+			// Configured commands are loaded after plugin commands in v2, so a
+			// user-defined /alias is allowed to take precedence naturally.
+			await ctx.command.transform((editor) => {
+				editor.add({
+					name: "alias",
+					description: "Manage model aliases (list, set, delete)",
+					async execute(input) {
+						let result: string;
+						try {
+							result = await handleAliasCommand(
+								input.prompt.text,
+								() => fetchV2Providers(ctx),
+							);
+						} catch (error) {
+							result = `Error: ${error instanceof Error ? error.message : "alias command failed"}`;
+						}
+						// V2 has no per-prompt tool restriction; request one bounded
+						// maintenance reply instead of another command execution.
+						await ctx.session.prompt({
+							sessionID: input.sessionID,
+							text: maintenancePrompt(result),
+							delivery: input.delivery,
+						});
+					},
+				});
+			});
+		},
+	}),
 	server,
-};
+} satisfies PluginModule;
 
 export default pluginModule;
