@@ -5,12 +5,17 @@ name: Publish
 #   package settings → Trusted Publisher → GitHub Actions
 #   repository: renaudcerrato/opencode-model-alias
 #   workflow:   publish.yml
-# Trigger by running the workflow manually from the Actions tab (or via
-# `gh workflow run publish.yml`); it publishes whatever version is in
-# package.json.
+# Publishes a new package.json version when merged into main. Manual dispatch
+# remains available for retrying a failed release.
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
+
+concurrency:
+  group: npm-publish-${{ github.repository }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -26,16 +31,30 @@ jobs:
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
-      - run: npm ci
-      - run: npm run typecheck
-      - run: npm test
-      - name: Check version is not already published
+      - name: Check published versions
+        id: version
         run: |
           VERSION=$(node -p "require('./package.json').version")
           NAME=$(node -p "require('./package.json').name")
-          if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
-            echo "::error::$NAME@$VERSION is already published. Bump the version first."
-            exit 1
+          VERSIONS=$(npm view "$NAME" versions --json)
+          STATUS=$(PUBLISHED_VERSIONS="$VERSIONS" TARGET_VERSION="$VERSION" node -e '
+            const published = JSON.parse(process.env.PUBLISHED_VERSIONS)
+            if (!Array.isArray(published) && typeof published !== "string") throw new Error("Unexpected npm versions response")
+            const versions = Array.isArray(published) ? published : [published]
+            process.stdout.write(versions.includes(process.env.TARGET_VERSION) ? "exists" : "new")
+          ')
+          if [ "$STATUS" = "exists" ]; then
+            echo "$NAME@$VERSION is already published; skipping."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
           fi
+      - if: steps.version.outputs.publish == 'true'
+        run: npm ci
+      - if: steps.version.outputs.publish == 'true'
+        run: npm run typecheck
+      - if: steps.version.outputs.publish == 'true'
+        run: npm test
       - name: Publish
+        if: steps.version.outputs.publish == 'true'
         run: npm publish --provenance --access public
