@@ -25,6 +25,14 @@ This is an OpenCode V2 plugin that maps aliases from `plugins[].options.aliases`
 - `npm test` - Run Jest with coverage (100% thresholds)
 - `npm run typecheck` - Type check the TypeScript plugin
 
+## Git Workflow
+
+- Develop and push changes on `dev`; do not push directly to `main`.
+- Open a pull request from `dev` to `main` when changes are ready.
+- `main` requires a PR and passing `test (20)`, `test (22)`, and `badges` checks. No bypass actors are configured; approvals are not required.
+- Keep README coverage badges current in the PR. CI verifies them against that PR's coverage and does not push badge commits.
+- Merging a package version into `main` triggers the npm publish workflow; already-published versions are skipped by the version guard.
+
 ## Project Structure
 
 - `src/index.ts` - V1 and V2 plugin implementations, alias parsing and resolution
